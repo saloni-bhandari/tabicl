@@ -24,8 +24,9 @@ class OneHotAndLinear(nn.Linear):
         self.num_classes = num_classes
         self.embed_dim = embed_dim
 
-    def forward(self, input:Tensor):
-        one_hot = F.one_hot(input.long(), self.num_classes).float()
+    def forward(self, input_tensor:Tensor):
+        input_tensor = input_tensor.long()
+        one_hot = F.one_hot(input_tensor, self.num_classes).float()
         layer = F.linear(one_hot, self.weight, self.bias)
         return layer
     
@@ -34,7 +35,7 @@ class SkippableLinear(nn.Linear):
         super().__init__(in_features, out_features, bias)
         self.skip_value = skip_value
 
-    def forward(self, input):
-        output = F.linear(input, self.weight, self.bias)
-        is_skipped = (input == self.skip_value).all(dim=-1, keepdim=True)
+    def forward(self, input_tensor):
+        output = F.linear(input_tensor, self.weight, self.bias)
+        is_skipped = (input_tensor == self.skip_value).all(dim=-1, keepdim=True)
         return torch.where(is_skipped, self.skip_value, output).to(output.dtype)
