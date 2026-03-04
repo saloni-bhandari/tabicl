@@ -32,12 +32,14 @@ def split_heads(x: Tensor, num_heads: int) -> Tensor:
     # [.., seq_len, embed_dim] -> [..., num_heads, seq_len, head_dim]
     *batch, seq_len, embed_dim = x.shape
     head_dim = embed_dim // num_heads
-    return x.view(*batch, seq_len, num_heads, head_dim).transpose(-3, -2)
+    x = x.reshape(*batch, seq_len, num_heads, head_dim)
+    return x.transpose(-3, -2)
 
 def merge_heads(x: Tensor) -> Tensor:
     # [..., num_heads, seq_len, head_dim] -> [.., seq_len, embed_dim]
     *batch, num_heads, seq_len, head_dim = x.shape
-    return x.transpose(-3, -2).contiguous().view(*batch, seq_len, num_heads * head_dim)
+    x = x.transpose(-3, -2).contiguous()
+    return x.reshape(*batch, seq_len, num_heads * head_dim) 
 
 def sdpa_with_flattened_batch(q: Tensor,k:Tensor,v:Tensor,
     attn_mask: Optional[Tensor] = None,
@@ -80,7 +82,6 @@ def sdpa_with_flattened_batch(q: Tensor,k:Tensor,v:Tensor,
         v_flash_att = v.transpose(-3,-2).contiguous()
 
         out = flash_attn_func(q_flash_att, k_flash_att, v_flash_att, causal=False)
-
         # reshape back to [batches, num_heads, seq_len, head_dims]
         out = out.transpose(-3,-2)
 
