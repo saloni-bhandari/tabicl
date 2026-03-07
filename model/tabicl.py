@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 
 from .column_embedding import ColEmbedding
-from .row_embedding import RowInteraction
+from .row_interaction import RowInteraction
 from .icl import ICLearning
 
 class TabICL(nn.Module):

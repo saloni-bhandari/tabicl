@@ -1,16 +1,27 @@
 import torch
 import torch.nn as nn
 
+from .encoders import Encoder
+
 class ICLearning(nn.Module):
-    def __init__(self, embedding_dim=32, nhead=1, vocab_size=100):
+    def __init__(self, embedding_dim=32, nhead=1, num_blocks=12, dim_feedforward=2048, vocab_size=100, debug=False):
         super(ICLearning, self).__init__()
+        self.debug = debug
         
         self.embedding = nn.Embedding(vocab_size, embedding_dim)
-        self.transformer = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(d_model=embedding_dim, nhead=nhead, batch_first=True),
-            num_layers=12
+        self.transformer = Encoder(
+            num_blocks=num_blocks,
+            d_model=embedding_dim,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=0.0,
+            activation="gelu",
+            use_rope=True,
+            rope_base=100000,
+            rope_interleaved=True,
+            recompute=False,
         )
-        
+
         self.prediction_MLP = nn.Sequential(
             nn.Linear(embedding_dim, embedding_dim * 2),
             nn.ReLU(),
@@ -59,7 +70,8 @@ class ICLearning(nn.Module):
         self._debug_print(f"Mask shape: {mask.shape}")
 
         # run the rep through transformers
-        rep = self.transformer(rep, mask=mask)
+        for block in self.transformer.blocks:
+            rep = block(rep)
 
         self._debug_print(f"Representations after transformer {rep.shape}")
 
@@ -83,6 +95,6 @@ if __name__ == "__main__":
 
     cls_outputs = torch.randn(batch_size, num_rows, embedding_dim)
     y = torch.randint(0, vocab_size, (batch_size, num_rows))
-    model = ICLearning(embedding_dim=embedding_dim, vocab_size=vocab_size)
+    model = ICLearning(embedding_dim=embedding_dim, vocab_size=vocab_size, debug=True)
 
     outputs = model(cls_outputs, y, test_size)

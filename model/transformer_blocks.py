@@ -1,7 +1,7 @@
 import torch
 from torch import Tensor, nn
 import torch.nn.functional as F
-from attention import multi_head_attention_forward
+from .attention import multi_head_attention_forward
 from .ssmax import create_ssmax_layer
 from .rope import RotaryEmbedding
 
