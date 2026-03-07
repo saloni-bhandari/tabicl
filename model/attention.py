@@ -1,5 +1,5 @@
-from rope import RotaryEmbedding
-from kv_cache import KVCacheEntry
+from .rope import RotaryEmbedding
+from .kv_cache import KVCacheEntry
 
 import torch
 from torch import Tensor, nn

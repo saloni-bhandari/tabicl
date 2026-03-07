@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from layers import OneHotAndLinear
+from .layers import OneHotAndLinear
 
 class ColEmbedding(nn.Module):
     def __init__(self, embedding_dim, nhead):

@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 
-from rope import RotaryEmbedding
-from attention import multi_head_attention_forward
+from .rope import RotaryEmbedding
+from .attention import multi_head_attention_forward
 
 
 class RoPEAttnLayer(nn.Module):
