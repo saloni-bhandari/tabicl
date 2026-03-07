@@ -107,3 +107,53 @@ class MAB(nn.Module):
         x = x + self.dropout2(self.ff(self.norm2(x)))
 
         return x
+
+class ISAB(nn.Module):
+    def __init__(
+        self,
+        embed_dim: int,
+        num_heads: int,
+        dim_feedforward: int,
+        num_inducing: int = 128,
+        dropout: float = 0.0,
+        activation: str = "gelu",
+        ssmax: Union[bool, str] = False,
+        skip_value: float = -100.0,
+    ):
+        super().__init__()
+        self.skip_value = skip_value
+
+        if isinstance(ssmax, bool):
+            ssmax = "qassmax-mlp-elementwise" if ssmax else "none"
+
+        # only first attention uses ssmax
+        self.mab1 = MAB(embed_dim, num_heads, dim_feedforward, dropout, activation, ssmax=ssmax)
+        self.mab2 = MAB(embed_dim, num_heads, dim_feedforward, dropout, activation, ssmax=False)
+
+        self.num_inducing = num_inducing
+        self.inducing_points = nn.Parameter(torch.empty(num_inducing, embed_dim))
+        nn.init.trunc_normal_(self.inducing_points, std=0.02)
+
+    def _induced_attention(self, src: Tensor, train_size: Optional[int] = None) -> Tensor:
+        *batch, _, model_dims = src.shape
+        VI = self.inducing_points.expand(*batch, self.num_inducing, model_dims)
+
+        src_train = src if train_size is None else src[..., :train_size, :]
+        attn = self.mab1(q=VI, k=src_train, v=src_train)  # (*batch, num_inducing, d)
+
+        out = self.mab2(q=src, k=attn, v=attn)               # (*batch, n_total, d)
+
+        return out
+
+    def forward(self, src: Tensor, train_size: Optional[int] = None) -> Tensor:
+        # handle skip values 
+        skip_mask = (src == self.skip_value).all(dim=(-2, -1))
+        if skip_mask.any():
+            if skip_mask.all():
+                return torch.full_like(src, self.skip_value)
+            out = torch.empty_like(src)
+            out[~skip_mask] = self._induced_attention(src[~skip_mask], train_size)
+            out[skip_mask] = self.skip_value
+            return out
+
+        return self._induced_attention(src, train_size) 
