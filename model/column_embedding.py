@@ -52,17 +52,23 @@ class ColEmbedding(nn.Module):
         X = self.embed_cells_to_dim(X)  # shape: (B * M * N, embedding_dim)
         print(f"Cell embeddings shape: {X.shape}")
 
+        # add label embedding to row feature embedding for only the first (num_rows - 1) rows
+        ## the last row is going to be unlabelled for prediction
+        y[:, train_size:, :] = 0 # zero out the label embedding for the non training rows since it's unlabelled
+
+        # reshape X for summing with y
+        X = X.view(batch_size, num_cols, num_rows, self.embedding_dim)
+        y = torch.unsqueeze(y, dim=1)
+        print(f"Reshaped X shape for summing with y: {X.shape}")
+        print(f"Unsqueezed y shape: {y.shape}")
+        X = X + y
+
         # Use transformer to encode the column-wise relationships
         ## We want attention to be done across each column of a table (batch), so that we can learn the relationships between the cell values in the same column.
         ## This means we have B * M sequneces (one for each column in a batch), and each sequence has N tokens (one for each cell/row in the column), and each token is represented by a vector of size embedding_dim.
         ## Reshape the embeddings in to (B * M, N, embedding_dim) to feed into the transformer encoder
         X = X.view(batch_size * num_cols, num_rows, -1)
         print(f"Reshaped X for transformer: {X.shape}")
-
-        # add label embedding to row feature embedding for only the first (num_rows - 1) rows
-        ## the last row is going to be unlabelled for prediction
-        y[:, train_size:, :] = 0 # zero out the label embedding for the non training rows since it's unlabelled
-        X = X + y
 
         ## Supposed to be set-transformer but we just use normal one for now
         ## Get distribution aware embedding for each column by using transformer
@@ -86,7 +92,7 @@ class ColEmbedding(nn.Module):
 
 if __name__ == "__main__":
     # testing
-    batch_size = 1
+    batch_size = 2
     num_cols = 3
     num_rows = 4
     embedding_dim = 8
