@@ -5,7 +5,6 @@ from rope import RotaryEmbedding
 from attention import multi_head_attention_forward
 
 
-
 class RoPEAttnLayer(nn.Module):
     """
     A version of an Attention-Encoder Layer with Rotary Positional Encodings
@@ -126,13 +125,20 @@ class RoPEAttnLayer(nn.Module):
         return y
     
 class RowEmbedding(nn.Module):
-    def __init__(self, nhead=1):
+    def __init__(self, num_rows, num_attention_blocks, embedding_dim=8, nhead=1):
         super(RowEmbedding, self).__init__()
 
         self.cls_token = nn.Parameter(torch.randn(1, 1, embedding_dim)) # shape: (1, 1, embedding_dim)
-        self.RopeAttnLayer = RoPEAttnLayer(d_model=embedding_dim, n_heads=nhead, max_pos_enc_len=num_rows + 4)
+        
+        rope_layers = []
+        for _ in range(num_attention_blocks):
+            rope_layers.append(RoPEAttnLayer(d_model=embedding_dim, n_heads=nhead, max_pos_enc_len=num_rows+4)) # max_pos_enc_len is num_rows + 4 CLS tokens
 
-    def forward(self, X, num_attention_blocks=4):
+        self.RopeAttnLayer = nn.Sequential(
+            *rope_layers
+        )
+
+    def forward(self, X):
         
         batch_size, num_cols, num_rows, embedding_dim = X.size()
 
@@ -156,8 +162,7 @@ class RowEmbedding(nn.Module):
         print(f"X shape after adding CLS tokens: {X.shape}")
 
         # do ROPE rotary positional embeddings
-        for i in range(num_attention_blocks):
-            X = self.RopeAttnLayer(X)
+        X = self.RopeAttnLayer(X)
         
         print(f"After doing multi_head_attention with ROPE: {X.shape}")
 
@@ -166,9 +171,9 @@ class RowEmbedding(nn.Module):
         cls_outputs = X[:, :4 , :]
         print(f"Class output tokens: {cls_outputs.shape}")
 
-        # reshape back into (batch_size, num_rows, 4, embedding_dim) to feed into the prediction head
-        cls_outputs = cls_outputs.view(batch_size, num_rows, -1, embedding_dim)
-        print(f"Reshaped class output tokens: {cls_outputs.shape}")
+        # concatenate the cls tokens for each row together
+        cls_outputs = cls_outputs.view(batch_size, num_rows, -1)
+        print(f"CLS outputs after concatenating the 4 CLS tokens together: {cls_outputs.shape}")
 
         return cls_outputs
 
@@ -178,8 +183,10 @@ if __name__ == "__main__":
     num_cols = 2
     num_rows = 3
     embedding_dim = 8
+    num_attention_blocks = 4
+    nhead=2
 
-    model = RowEmbedding()
+    model = RowEmbedding(num_rows, num_attention_blocks, embedding_dim, nhead)
     X = torch.randn(batch_size, num_cols, num_rows, embedding_dim) # this is the output after column embedding
     model(X)
     
