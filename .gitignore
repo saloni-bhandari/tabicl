@@ -6,3 +6,5 @@ env/
 __pycache__/
 *.pyc
 *.pyo
+
+synthetic_tabicl_data
