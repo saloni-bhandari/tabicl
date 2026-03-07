@@ -1,3 +1,4 @@
+from model.encoders import SetTransformer
 import torch
 import torch.nn as nn
 
@@ -19,8 +20,13 @@ class ColEmbedding(nn.Module):
 
         # Transformer encoder for column-wise encoding
         # output will be the "distribution description" of the column, which captures the relationships between the cell values in the column
-        # TODO: convert to SetTransformer
-        self.encode_column = nn.TransformerEncoderLayer(d_model=embedding_dim, nhead=nhead, batch_first=True) 
+        
+        self.encode_column = SetTransformer(
+            num_blocks=16,
+            d_model=embedding_dim,
+            nhead=nhead,
+            dim_feedforward=2048,
+        )
 
         # take the distribution description and generate W and B
         ## W is the embedding_dim since we want to do element-wise multiplication with the original cell embedding
@@ -106,7 +112,7 @@ if __name__ == "__main__":
     embedding_dim = 32
     nhead = 2
 
-    model = ColEmbedding(embedding_dim, nhead)
+    model = ColEmbedding(embedding_dim, nhead, num_classes=10, debug=True)
     X = torch.randn(batch_size, num_cols, num_rows)
     y = torch.randint(0, 10, (batch_size, num_rows)).to(dtype=torch.float32)
     output = model(X, y)
