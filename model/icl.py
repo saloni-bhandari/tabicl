@@ -18,23 +18,28 @@ class ICLearning(nn.Module):
         )
         self.softmax = nn.Softmax(dim=-1) # softmax across the vocab
         
+        
+    def _debug_print(self, *args):
+        if self.debug:
+            print(*args)
+
     def forward(self, cls_outputs, y, test_size):
         
         batch_size, num_rows = y.size()
-        print(f"Y shape: {y.shape}")
+        self._debug_print(f"Y shape: {y.shape}")
         
         # embed y into dimensionality of cls_outputs
         y = self.embedding(y)
-        print(f"Embedded Y shape: {y.shape}")
+        self._debug_print(f"Embedded Y shape: {y.shape}")
 
         # mask the last test_size labels
         y[:, -test_size: , :] = 0
 
         # get representation that includes label (training samples + test samples)
 
-        print(cls_outputs.shape, y.shape)
+        self._debug_print(cls_outputs.shape, y.shape)
         rep = cls_outputs + y 
-        print(f"Representations of each row of data: {rep.shape}") # 2 batches, 4 rows each, 32 features in total (from the CLS tokens after row interaction + label embedding)
+        self._debug_print(f"Representations of each row of data: {rep.shape}") # 2 batches, 4 rows each, 32 features in total (from the CLS tokens after row interaction + label embedding)
         # rep.shape=(2, 4, 32) => can consider that we have 2 sequences, of 4 tokens each, each token has 32 dim embedding
 
         # create mask to hide the test tokens from the train tokens, and each test token from each other
@@ -50,22 +55,22 @@ class ICLearning(nn.Module):
         for i in range(test_size):
             mask[-test_size+i, -test_size+i] = 0.0
         
-        print(f"Mask: {mask}")
-        print(f"Mask shape: {mask.shape}")
+        self._debug_print(f"Mask: {mask}")
+        self._debug_print(f"Mask shape: {mask.shape}")
 
         # run the rep through transformers
         rep = self.transformer(rep, mask=mask)
 
-        print(f"Representations after transformer {rep.shape}")
+        self._debug_print(f"Representations after transformer {rep.shape}")
 
         test_reps = rep[:, -test_size:, :]
 
-        print(f"Test representations: {test_reps.shape}")
+        self._debug_print(f"Test representations: {test_reps.shape}")
 
         # make prediction for the test tokens using their representations
         logits = self.prediction_MLP(test_reps)
         
-        print(f"Logits: {logits.shape}")
+        self._debug_print(f"Logits: {logits.shape}")
 
         return logits
 

@@ -3,23 +3,23 @@
 import torch
 import torch.nn as nn
 
-from column_embedding import ColEmbedding
-from row_embedding import RowEmbedding
-from icl import ICLearning
+from .column_embedding import ColEmbedding
+from .row_embedding import RowInteraction
+from .icl import ICLearning
 
 class TabICL(nn.Module):
     def __init__(self, vocab_size, embedding_dim):
         super(TabICL, self).__init__()
-        self.column_embedding = ColEmbedding(embedding_dim=embedding_dim, nhead=2)
-        self.row_embedding = RowEmbedding(num_rows=4, num_attention_blocks=4, embedding_dim=embedding_dim, nhead=2)
+        self.column_embedding = ColEmbedding(embedding_dim=embedding_dim, nhead=2, num_classes=vocab_size)
+        self.row_embedding = RowInteraction(num_rows=4, num_attention_blocks=4, embedding_dim=embedding_dim, nhead=2)
         self.icl = ICLearning(embedding_dim=embedding_dim*4, nhead=1, vocab_size=vocab_size) # embedding_dim*4 since we concatenate the 4 CLS tokens together for each row, and each CLS token has embedding_dim dimensions
 
     def forward(self, X, y, test_size): 
         # input data should be of form (batch_size, num_cols, num_rows), with labels 
         embeddings = self.column_embedding(X, y)
-        print("----------")
+        # print("----------")
         cls_representations = self.row_embedding(embeddings)
-        print("----------")
+        # print("----------")
         logits = self.icl(cls_representations, y, test_size)
 
         return logits

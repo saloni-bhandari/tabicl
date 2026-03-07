@@ -124,69 +124,72 @@ class RoPEAttnLayer(nn.Module):
         y = self.dropout(y)
         return y
     
-class RowEmbedding(nn.Module):
-    def __init__(self, num_rows, num_attention_blocks, embedding_dim=8, nhead=1):
-        super(RowEmbedding, self).__init__()
+class RowInteraction(nn.Module):
+    def __init__(self, num_rows, num_attention_blocks, embedding_dim=8, nhead=1, debug=False):
+        super(RowInteraction, self).__init__()
 
         self.cls_token = nn.Parameter(torch.randn(1, 1, embedding_dim)) # shape: (1, 1, embedding_dim)
+        self.debug = debug
         
         rope_layers = []
         for _ in range(num_attention_blocks):
-            rope_layers.append(RoPEAttnLayer(d_model=embedding_dim, n_heads=nhead, max_pos_enc_len=num_rows+4)) # max_pos_enc_len is num_rows + 4 CLS tokens
+            rope_layers.append(RoPEAttnLayer(d_model=embedding_dim, n_heads=nhead, max_pos_enc_len=512)) # max_pos_enc_len is num_rows + 4 CLS tokens
 
         self.RopeAttnLayer = nn.Sequential(
             *rope_layers
         )
 
+    def _debug_print(self, *args):
+        if self.debug:
+            print(*args)
+
     def forward(self, X):
-        
+
         batch_size, num_cols, num_rows, embedding_dim = X.size()
 
-        print(f"Input X shape: {X.shape}")
+        self._debug_print(f"Input X shape: {X.shape}")
 
-        # combine the different columns of each row to form one single vector/sequence representation for that row 
-        ## to do this, we concatenante the embedding_dims of each row's columns
-        ## output should be (batch_size, num_rows, num_cols * embedding_dim)
-        ## we can also just do a simple aggregation like mean
-        ## Then, we do a linear feed forward to aggregate back to embedding_dim dimensions
         X = X.view(batch_size * num_rows, num_cols, embedding_dim)
-        print(f"Collapsed X shape: {X.shape}")
 
-        # prepend 4 CLS tokens to the beginning of each row
-        # CLS token is a learnable embedding that is used to aggregate information from the rest of the row, and will be used for prediction
+        self._debug_print(f"Collapsed X shape: {X.shape}")
 
-        cls_tokens = self.cls_token.expand(batch_size*num_rows, 4, embedding_dim)
+        cls_tokens = self.cls_token.expand(batch_size * num_rows, 4, embedding_dim)
+        self._debug_print(f"CLS tokens shape: {cls_tokens.shape}")
 
         X = torch.cat((cls_tokens, X), dim=1)
 
-        print(f"X shape after adding CLS tokens: {X.shape}")
+        self._debug_print(f"X shape after adding CLS tokens: {X.shape}")
 
-        # do ROPE rotary positional embeddings
+        X = X.view(batch_size, num_rows, -1, embedding_dim)
+        self._debug_print(f"X shape after reshaping back: {X.shape}")
+
+        X = X.view(batch_size * num_rows, -1, embedding_dim)
+        self._debug_print(f"X shape after reshaping for attention layer: {X.shape}")
+
         X = self.RopeAttnLayer(X)
-        
-        print(f"After doing multi_head_attention with ROPE: {X.shape}")
 
-        # extract class tokens
+        self._debug_print(f"After doing multi_head_attention with ROPE: {X.shape}")
 
-        cls_outputs = X[:, :4 , :]
-        print(f"Class output tokens: {cls_outputs.shape}")
+        cls_outputs = X[:, :4, :]
+        self._debug_print(f"Class output tokens: {cls_outputs.shape}")
 
-        # concatenate the cls tokens for each row together
         cls_outputs = cls_outputs.view(batch_size, num_rows, -1)
-        print(f"CLS outputs after concatenating the 4 CLS tokens together: {cls_outputs.shape}")
+        self._debug_print(
+            f"CLS outputs after concatenating the 4 CLS tokens together: {cls_outputs.shape}"
+        )
 
         return cls_outputs
 
 if __name__ == "__main__":
     # testing
     batch_size = 2
-    num_cols = 2
-    num_rows = 3
-    embedding_dim = 8
+    num_cols = 8
+    num_rows = 5
+    embedding_dim = 32
     num_attention_blocks = 4
     nhead=2
 
-    model = RowEmbedding(num_rows, num_attention_blocks, embedding_dim, nhead)
+    model = RowInteraction(num_rows, num_attention_blocks, embedding_dim, nhead)
     X = torch.randn(batch_size, num_cols, num_rows, embedding_dim) # this is the output after column embedding
     model(X)
     
