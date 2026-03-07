@@ -1,5 +1,6 @@
 import os
 
+import model
 import numpy as np
 import pandas as pd
 import torch
@@ -10,6 +11,9 @@ import torch.optim as optim
 import matplotlib.pyplot as plt
 
 from model.tabicl import TabICL
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Using device:", device)
 
 class TabularDataset(Dataset):
     def __init__(self, filepath, num_rows_per_datapoint=4):
@@ -33,7 +37,7 @@ class TabularDataset(Dataset):
         
         return np.array(features), np.array(labels)
     
-def train(num_epochs=10, learning_rate=1e-3, test_size=1):
+def train(num_epochs=100, learning_rate=1e-3, test_size=1, batch_size=16):
 
     embedding_dim = 32
     num_rows_per_datapoint = 4
@@ -43,12 +47,12 @@ def train(num_epochs=10, learning_rate=1e-3, test_size=1):
         num_rows_per_datapoint=num_rows_per_datapoint
     )
 
-    dataloader = DataLoader(training_data)
+    dataloader = DataLoader(training_data, batch_size=batch_size, pin_memory=True)
 
     vocab_size = training_data.get_num_labels()
 
-    model = TabICL(vocab_size=vocab_size, embedding_dim=embedding_dim)
-
+    model = TabICL(vocab_size=vocab_size, embedding_dim=embedding_dim).to(device)
+    print(next(model.parameters()).device)
     criterion = nn.CrossEntropyLoss()
     optimiser = optim.Adam(model.parameters(), lr=learning_rate)
 
@@ -63,7 +67,7 @@ def train(num_epochs=10, learning_rate=1e-3, test_size=1):
         num_batches = 0
 
         for i, (features, labels) in enumerate(dataloader):
-
+            
             print(f"Mini-table {i} | Shape of data: {features.shape}, {labels.shape}")
 
             features = features.float()
@@ -102,16 +106,17 @@ def train(num_epochs=10, learning_rate=1e-3, test_size=1):
     return model, epoch_losses
 
 
-def overfit_single_batch(training_data, model, vocab_size, test_size=1):
+def overfit_single_batch(training_data, model, vocab_size, test_size=1, batch_size=16):
 
     print("\nRunning overfit-single-batch test")
 
-    dataloader = DataLoader(training_data, batch_size=32, shuffle=False)
+    dataloader = DataLoader(training_data, batch_size=batch_size, shuffle=False, pin_memory=True)
 
     # get batch_size number of mini-tables
     features, labels = next(iter(dataloader))
 
-    features = features.float()
+    features = features.float().to(device)
+    labels = labels.to(device)
 
     criterion = nn.CrossEntropyLoss()
     optimiser = optim.Adam(model.parameters(), lr=1e-3)
@@ -119,11 +124,12 @@ def overfit_single_batch(training_data, model, vocab_size, test_size=1):
     num_steps = 1000
 
     for step in range(num_steps):
+        # print(f"\nStep {step}/{num_steps}")
 
-        outputs = model(features, labels, test_size=test_size)
+        outputs = model(features, labels, test_size=test_size).to(device)
         outputs = outputs.view(-1, vocab_size)
 
-        ground_truth = labels[:, -test_size:].squeeze(-1).long()
+        ground_truth = labels[:, -test_size:].squeeze(-1).long().to(device)
 
         loss = criterion(outputs, ground_truth)
 
@@ -139,11 +145,11 @@ def overfit_single_batch(training_data, model, vocab_size, test_size=1):
     return model
 
 
-def test(model, dataset, vocab_size, test_size=1):
+def test(model, dataset, vocab_size, test_size=1, batch_size=16):
 
     model.eval()  # disable dropout etc
 
-    dataloader = DataLoader(dataset, batch_size=32, shuffle=False)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
     total = 0
     correct = 0
@@ -151,10 +157,12 @@ def test(model, dataset, vocab_size, test_size=1):
     with torch.no_grad():
 
             features, labels = next(iter(dataloader))
+            print(f"Class counts in test batch: {torch.bincount(labels[:, -test_size:].squeeze(-1).long())}")
+            print(f"Fraction of each class in test batch: {torch.bincount(labels[:, -test_size:].squeeze(-1).long()) / labels[:, -test_size:].squeeze(-1).shape[0]}")
 
-            features = features.float()
-
-            outputs = model(features, labels, test_size=test_size)
+            features = features.float().to(device)
+            labels = labels.to(device)
+            outputs = model(features, labels, test_size=test_size).to(device)
             outputs = outputs.view(-1, vocab_size)
 
             ground_truth = labels[:, -test_size:].squeeze(-1).long()
@@ -184,10 +192,10 @@ if __name__ == "__main__":
     )
 
     vocab_size = training_data.get_num_labels()
+    batch_size = 16
 
-    model = TabICL(vocab_size=vocab_size, embedding_dim=32)
+    model = TabICL(vocab_size=vocab_size, embedding_dim=32).to(device)
+    print(f"Before training model: test accuracy: {test(model, training_data, vocab_size, batch_size=batch_size)}")
+    model = overfit_single_batch(training_data, model, vocab_size, batch_size=batch_size)
     
-    print(f"Before training model: test accuracy: {test(model, training_data, vocab_size)}")
-    model = overfit_single_batch(training_data, model, vocab_size)
-    
-    print(f"After training model: test accuracy: {test(model, training_data, vocab_size)}")
+    print(f"After training model: test accuracy: {test(model, training_data, vocab_size, batch_size=batch_size)}")
