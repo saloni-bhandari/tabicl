@@ -8,3 +8,5 @@ __pycache__/
 *.pyo
 
 synthetic_tabicl_data
+*.pt
+data/

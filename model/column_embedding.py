@@ -1,118 +1,149 @@
 from model.encoders import SetTransformer
 import torch
 import torch.nn as nn
+from typing import Optional, List
 
 from .layers import OneHotAndLinear
 
+
 class ColEmbedding(nn.Module):
-    def __init__(self, embedding_dim, nhead, num_classes, debug=False):
-        super(ColEmbedding, self).__init__()
+
+    def __init__(
+        self,
+        embedding_dim,
+        nhead,
+        num_classes,
+        num_blocks=3,
+        dim_feedforward=64,
+        debug=False,
+    ):
+        super().__init__()
 
         self.embedding_dim = embedding_dim
         self.nhead = nhead
         self.num_classes = num_classes
         self.debug = debug
 
-        self.label_embedding = OneHotAndLinear(num_classes=self.num_classes, embed_dim=self.embedding_dim)
-
-        # Embedding for each cell value in the column, we treat each cell as a scalar and embed it to a vector of size embedding_dim
-        self.embed_cells_to_dim = nn.Linear(1, embedding_dim)
-
-        # Transformer encoder for column-wise encoding
-        # output will be the "distribution description" of the column, which captures the relationships between the cell values in the column
-        
-        self.encode_column = SetTransformer(
-            num_blocks=16,
-            d_model=embedding_dim,
-            nhead=nhead,
-            dim_feedforward=2048,
+        self.label_embedding = OneHotAndLinear(
+            num_classes=self.num_classes,
+            embed_dim=self.embedding_dim
         )
 
-        # take the distribution description and generate W and B
-        ## W is the embedding_dim since we want to do element-wise multiplication with the original cell embedding
-        ## B is also embedding_dim since we want to do element-wise addition with the original cell embedding
+        self.embed_cells_to_dim = nn.Linear(1, embedding_dim)
+
+        self.encode_column = SetTransformer(
+            num_blocks=num_blocks,
+            d_model=embedding_dim,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+        )
+
         self.generate_W = nn.Linear(embedding_dim, embedding_dim)
         self.generate_B = nn.Linear(embedding_dim, embedding_dim)
-
-        # combine original embedding + W and B to get distribution aware embedding for each cell
-        self.final_embedding = lambda cell_embedding, W, B: cell_embedding * W + B
 
     def _debug_print(self, *args):
         if self.debug:
             print(*args)
 
-    def forward(self, X, y, test_size=1):
-        
-        # X shape: (batch_size, num_cols, num_rows) = (B, M, N)
-        # num_cols is the number of features in the input data
-        # num_rows is number of support rows for ICL + query row
-        # batch_size is the number of examples in the batch (with ICL, each example is a table with M columns and N rows)
+    def forward(
+        self,
+        X: torch.Tensor,
+        y_train: torch.Tensor,
+        d: Optional[torch.Tensor] = None,
+        embed_with_test: bool = False,
+        feature_shuffles: Optional[List[List[int]]] = None,
+        mgr_config=None,
+    ) -> torch.Tensor:
+        """
+        Parameters
+        ----------
+        X : (B, T, Hmax)
+            Possibly padded input table batch.
+        y_train : (B, train_size)
+        d : (B,)
+            Number of valid features in each table.
+        embed_with_test : bool
+            If False, the column encoder should only condition on train rows.
 
-        batch_size, num_cols, num_rows = X.size()
-        
-        self._debug_print(f"Original X shape: {X.shape}")
-        self._debug_print(f"Input y shape: {y.shape}")
+        Returns
+        -------
+        X_out : (B, T, Hmax, E)
+        """
+        B, T, H = X.shape
+        train_size = y_train.shape[1]
+        device = X.device
 
-        # embed y labels to be same dimension as inputs 
-        self._debug_print(f"Number of rows {num_rows}")
-        y = self.label_embedding(y.long().view(-1, 1)).view(batch_size, num_rows, -1)
-        self._debug_print(f"Embedded y shape: {y.shape}")
+        self._debug_print("Input X:", X.shape)
+        self._debug_print("Input y_train:", y_train.shape)
+        self._debug_print("Input d:", None if d is None else d.shape)
 
-        # Step 1: Embed each cell value to a vector of size embedding_dim
-        # reshape X to (B * M * N, 1) to feed into the linear layer
-        X = X.view(-1, 1)
-        self._debug_print(f"Reshaped X shape for embedding: {X.shape}")
+        y_full = torch.zeros(B, T, dtype=y_train.dtype, device=device)
+        y_full[:, :train_size] = y_train
 
-        X = self.embed_cells_to_dim(X)  # shape: (B * M * N, embedding_dim)
-        self._debug_print(f"Cell embeddings shape: {X.shape}")
+        y_emb = self.label_embedding(y_full.long().reshape(-1, 1))
+        y_emb = y_emb.reshape(B, T, self.embedding_dim)
 
-        # add label embedding to row feature embedding for only the first (num_rows - 1) rows
-        ## the last test_size number of rows is going to be unlabelled for prediction
-        y[:, -test_size:, :] = 0 # zero out the label embedding for the non training rows since it's unlabelled
+        # zero out test rows explicitly
+        y_emb[:, train_size:, :] = 0.0
 
-        # reshape X for summing with y
-        X = X.view(batch_size, num_cols, num_rows, self.embedding_dim)
-        y = torch.unsqueeze(y, dim=1)
-        self._debug_print(f"Reshaped X shape for summing with y: {X.shape}")
-        self._debug_print(f"Unsqueezed y shape: {y.shape}")
-        X = X + y
+        X_t = X.transpose(1, 2)  # (B, H, T)
 
-        # Use transformer to encode the column-wise relationships
-        ## We want attention to be done across each column of a table (batch), so that we can learn the relationships between the cell values in the same column.
-        ## This means we have B * M sequneces (one for each column in a batch), and each sequence has N tokens (one for each cell/row in the column), and each token is represented by a vector of size embedding_dim.
-        ## Reshape the embeddings in to (B * M, N, embedding_dim) to feed into the transformer encoder
-        X = X.view(batch_size * num_cols, num_rows, -1)
-        self._debug_print(f"Reshaped X for transformer: {X.shape}")
+        if d is None:
+            # all columns valid
+            valid_mask = torch.ones(B, H, dtype=torch.bool, device=device)
+        else:
+            col_idx = torch.arange(H, device=device).unsqueeze(0).expand(B, H)
+            valid_mask = col_idx < d.unsqueeze(1)  # (B, H)
 
-        ## Supposed to be set-transformer but we just use normal one for now
-        ## Get distribution aware embedding for each column by using transformer
-        X = self.encode_column(X)
-        self._debug_print(f"Encoded column representations shape: {X.shape}")
+        # Extract valid columns only
+        valid_cols = X_t[valid_mask]  # (N_valid, T)
+        valid_cols_scalar = valid_cols.unsqueeze(-1)  # (N_valid, T, 1)
 
-        # Generate W and B distribution parameters for each column
-        W = self.generate_W(X)  # shape: (B * M, N, embedding_dim)
-        B = self.generate_B(X)  # shape: (B * M, N, embedding_dim)
+        self._debug_print("Valid columns:", valid_cols_scalar.shape)
 
-        # Combine original cell embedding with W and B to get distribution aware embedding for each cell
-        ## Reshape W and B back to (B, M, N, embedding_dim)
-        X = self.final_embedding(X, W, B)
-        self._debug_print(f"Final distribution-aware embedding shape: {X.shape}")
+        valid_cols_emb = self.embed_cells_to_dim(valid_cols_scalar)  # (N_valid, T, E)
 
-        # split the embeddings back into their individual batches
-        X = X.view(batch_size, num_cols, num_rows, -1) # (B, M, N, embedding_dim)
-        self._debug_print(f"Final output shape: {X.shape}")
-        
-        return X
+        # We need matching y embeddings for each valid column
+        # Expand y_emb from (B, T, E) -> (B, H, T, E), then index by valid_mask
+        y_expand = y_emb.unsqueeze(1).expand(B, H, T, self.embedding_dim)
+        valid_y_emb = y_expand[valid_mask]  # (N_valid, T, E)
 
+        valid_cols_emb = valid_cols_emb + valid_y_emb
+
+        valid_cols_encoded = self.encode_column(
+            valid_cols_emb,
+            train_size=None if embed_with_test else train_size,
+        )  # (N_valid, T, E)
+
+        self._debug_print("Encoded valid columns:", valid_cols_encoded.shape)
+
+        W = self.generate_W(valid_cols_encoded)      # (N_valid, T, E)
+        B_bias = self.generate_B(valid_cols_encoded) # (N_valid, T, E)
+
+        # Apply affine transform to ORIGINAL scalar values
+        valid_cols_out = valid_cols_scalar * W + B_bias  # (N_valid, T, E)
+
+        X_out_cols = torch.zeros(B, H, T, self.embedding_dim, device=device, dtype=valid_cols_out.dtype)
+        X_out_cols[valid_mask] = valid_cols_out
+
+        X_out = X_out_cols.permute(0, 2, 1, 3)  # (B, T, H, E)
+
+        self._debug_print("Output embeddings:", X_out.shape)
+
+        return X_out
+    
 if __name__ == "__main__":
-    # testing
     batch_size = 2
     num_cols = 4
     num_rows = 8
     embedding_dim = 32
     nhead = 2
+    train_size = 4
 
     model = ColEmbedding(embedding_dim, nhead, num_classes=10, debug=True)
-    X = torch.randn(batch_size, num_cols, num_rows)
-    y = torch.randint(0, 10, (batch_size, num_rows)).to(dtype=torch.float32)
-    output = model(X, y)
+    X = torch.randn(batch_size, num_rows, num_cols)
+    y_train = torch.randint(0, 10, (batch_size, train_size))
+    d = torch.tensor([4, 3])
+
+    output = model(X, y_train, d=d)
+    print(output.shape)

@@ -1,14 +1,29 @@
+from typing import Optional
 import torch
 import torch.nn as nn
 
 from .encoders import Encoder
 
+
 class ICLearning(nn.Module):
-    def __init__(self, embedding_dim=32, nhead=1, num_blocks=12, dim_feedforward=2048, vocab_size=100, debug=False):
-        super(ICLearning, self).__init__()
+
+    def __init__(
+        self,
+        embedding_dim=32,
+        nhead=1,
+        num_blocks=12,
+        dim_feedforward=2048,
+        vocab_size=100,
+        debug=False,
+    ):
+        super().__init__()
+
+        self.embedding_dim = embedding_dim
+        self.vocab_size = vocab_size
         self.debug = debug
-        
+
         self.embedding = nn.Embedding(vocab_size, embedding_dim)
+
         self.transformer = Encoder(
             num_blocks=num_blocks,
             d_model=embedding_dim,
@@ -24,65 +39,100 @@ class ICLearning(nn.Module):
 
         self.prediction_MLP = nn.Sequential(
             nn.Linear(embedding_dim, embedding_dim * 2),
-            nn.ReLU(),
-            nn.Linear(embedding_dim * 2, vocab_size)
+            nn.GELU(),
+            nn.Linear(embedding_dim * 2, vocab_size),
         )
-        self.softmax = nn.Softmax(dim=-1) # softmax across the vocab
-        
-        
+
     def _debug_print(self, *args):
         if self.debug:
             print(*args)
 
-    def forward(self, cls_outputs, y, test_size):
-        
-        batch_size, num_rows = y.size()
-        self._debug_print(f"Y shape: {y.shape}")
-        
-        # embed y into dimensionality of cls_outputs
-        y = self.embedding(y)
-        self._debug_print(f"Embedded Y shape: {y.shape}")
+    def _build_attention_mask(self, T, train_size, device):
+        """
+        Implements the ICL masking rule:
 
-        # mask the last test_size labels
-        y[:, -test_size: , :] = 0
+        train rows -> only attend to train rows
+        test rows -> attend to train rows + itself
+        test rows cannot attend to other test rows
+        """
 
-        # get representation that includes label (training samples + test samples)
+        mask = torch.zeros(T, T, device=device)
 
-        self._debug_print(cls_outputs.shape, y.shape)
-        rep = cls_outputs + y 
-        self._debug_print(f"Representations of each row of data: {rep.shape}") # 2 batches, 4 rows each, 32 features in total (from the CLS tokens after row interaction + label embedding)
-        # rep.shape=(2, 4, 32) => can consider that we have 2 sequences, of 4 tokens each, each token has 32 dim embedding
+        # training rows cannot see test rows
+        mask[:train_size, train_size:] = float("-inf")
 
-        # create mask to hide the test tokens from the train tokens, and each test token from each other
-        # e.g. if 4 rows and 2 of them are test samples, row 1 attends to 1 and 2, row 2 attends to 1 and 2, 
-        # row 3 attends to 1 and 2 and 3, row 4 attends to 1 and 2 and 4
-        mask = torch.zeros(num_rows, num_rows)
-        
-        for i in range(num_rows - test_size):
-            mask[i, -test_size: ] = float('-inf')
-        
-        mask[-test_size: , -test_size: ] = float('-inf')
-        
-        for i in range(test_size):
-            mask[-test_size+i, -test_size+i] = 0.0
-        
-        self._debug_print(f"Mask: {mask}")
-        self._debug_print(f"Mask shape: {mask.shape}")
+        # test rows cannot see other test rows
+        mask[train_size:, train_size:] = float("-inf")
 
-        # run the rep through transformers
+        # but allow self attention
+        for i in range(train_size, T):
+            mask[i, i] = 0
+
+        return mask
+
+    def forward(
+        self,
+        R: torch.Tensor,
+        y_train: torch.Tensor,
+        return_logits: bool = True,
+        softmax_temperature: float = 0.9,
+        mgr_config=None,
+    ):
+        """
+        Parameters
+        ----------
+        R : (B, T, D)
+            row representations from RowInteraction
+
+        y_train : (B, train_size)
+
+        Returns
+        -------
+        predictions : (B, test_size, vocab_size)
+        """
+
+        B, T, D = R.shape
+        train_size = y_train.shape[1]
+
+        self._debug_print("Row representations:", R.shape)
+        self._debug_print("y_train:", y_train.shape)
+
+        # reconstruct full label tensor
+        y_full = torch.zeros(B, T, dtype=torch.long, device=R.device)
+        y_full[:, :train_size] = y_train
+
+        y_emb = self.embedding(y_full)
+
+        # hide test labels
+        y_emb[:, train_size:, :] = 0
+
+        self._debug_print("Label embeddings:", y_emb.shape)
+
+        # combine row representation with label embedding
+        rep = R + y_emb
+
+        self._debug_print("Combined representations:", rep.shape)
+
+        # build ICL mask
+        mask = self._build_attention_mask(T, train_size, R.device)
+
+        self._debug_print("Mask:", mask)
+
+        # transformer
         for block in self.transformer.blocks:
-            rep = block(rep)
+            rep = block(rep, attn_mask=mask)
 
-        self._debug_print(f"Representations after transformer {rep.shape}")
+        self._debug_print("After transformer:", rep.shape)
 
-        test_reps = rep[:, -test_size:, :]
+        # predictions only for test rows
+        test_reps = rep[:, train_size:, :]
 
-        self._debug_print(f"Test representations: {test_reps.shape}")
-
-        # make prediction for the test tokens using their representations
         logits = self.prediction_MLP(test_reps)
-        
-        self._debug_print(f"Logits: {logits.shape}")
+
+        self._debug_print("Logits:", logits.shape)
+
+        if not return_logits:
+            logits = torch.softmax(logits / softmax_temperature, dim=-1)
 
         return logits
 
@@ -90,11 +140,11 @@ if __name__ == "__main__":
     batch_size = 2
     num_rows = 4
     embedding_dim = 32
-    test_size = 1
+    train_size = 2
     vocab_size = 100
 
     cls_outputs = torch.randn(batch_size, num_rows, embedding_dim)
     y = torch.randint(0, vocab_size, (batch_size, num_rows))
     model = ICLearning(embedding_dim=embedding_dim, vocab_size=vocab_size, debug=True)
 
-    outputs = model(cls_outputs, y, test_size)
+    outputs = model(cls_outputs, y, train_size=train_size)

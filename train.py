@@ -1,201 +1,321 @@
-import os
-
-import model
-import numpy as np
-import pandas as pd
 import torch
-from torch.utils.data import Dataset, DataLoader
 import torch.nn as nn
-from torch.nn import functional as F
 import torch.optim as optim
-import matplotlib.pyplot as plt
+from torch.utils.data import DataLoader
 
+from prior.dataset import PriorDataset
+from prior.genload import LoadPriorDataset
 from model.tabicl import TabICL
+
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
 
-class TabularDataset(Dataset):
-    def __init__(self, filepath, num_rows_per_datapoint=4):
-        self.df = pd.read_csv(filepath)
-        self.features = self.df.iloc[:, :-1]
-        self.labels = self.df.iloc[:, -1]
-        self.num_rows_per_datapoint = num_rows_per_datapoint
 
-    def get_num_labels(self):
-        return self.labels.unique().shape[0]
+def configure_prior(prior_dir, batch_size=16, max_seq_len=128, max_features=10):
+    """Set up a tabular dataset generator for synthetic data during training."""
 
-    def __len__(self):
-        return self.df.shape[0]//self.num_rows_per_datapoint
+    if prior_dir is None:
+        print("No prior directory provided. Generating synthetic data on the fly.")
+        dataset = PriorDataset(
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            batch_size=batch_size,
+            max_seq_len=max_seq_len,
+            max_features=max_features,
+        )
+    else:
+        print(f"Loading prior dataset from directory: {prior_dir}")
+        dataset = LoadPriorDataset(data_dir=prior_dir)
 
-    def __getitem__(self, idx):
-        start_idx = idx * self.num_rows_per_datapoint
-        end_idx = start_idx + self.num_rows_per_datapoint
-
-        features = self.features.iloc[start_idx:end_idx, :].T
-        labels = self.labels.iloc[start_idx:end_idx]
-        
-        return np.array(features), np.array(labels)
-    
-def train(num_epochs=100, learning_rate=1e-3, test_size=1, batch_size=16):
-
-    embedding_dim = 32
-    num_rows_per_datapoint = 4
-
-    training_data = TabularDataset(
-        filepath="synthetic_tabicl_data/dataset_0.csv",
-        num_rows_per_datapoint=num_rows_per_datapoint
+    dataloader = DataLoader(
+        dataset,
+        batch_size=None,
+        shuffle=False,
+        num_workers=1,
+        prefetch_factor=4,
     )
 
-    dataloader = DataLoader(training_data, batch_size=batch_size, pin_memory=True)
+    return dataset, dataloader
 
-    vocab_size = training_data.get_num_labels()
+def pad_nested_batch(batch):
+    out = []
+    for t in batch:
+        if hasattr(t, "is_nested") and t.is_nested:
+            out.append(t.to_padded_tensor(padding=0.0))
+        else:
+            out.append(t)
+    return out
 
-    model = TabICL(vocab_size=vocab_size, embedding_dim=embedding_dim).to(device)
-    print(next(model.parameters()).device)
+
+def split_batch_by_shape(batch):
+    """
+    Split one padded batch into groups where all samples share
+    the same seq_len and train_size.
+    """
+    X, y, d, seq_lens, train_sizes = pad_nested_batch(batch)
+
+    groups = {}
+
+    for i in range(X.size(0)):
+        seq_len_i = int(seq_lens[i].item()) if torch.is_tensor(seq_lens[i]) else int(seq_lens[i])
+        train_size_i = int(train_sizes[i].item()) if torch.is_tensor(train_sizes[i]) else int(train_sizes[i])
+
+        key = (seq_len_i, train_size_i)
+        groups.setdefault(key, []).append(i)
+
+    grouped_batches = []
+
+    for (seq_len, train_size), indices in groups.items():
+        idx = torch.tensor(indices, dtype=torch.long)
+
+        sub_X = X[idx, :seq_len, :]
+        sub_y = y[idx, :seq_len]
+        sub_d = d[idx]
+
+        max_features = int(sub_d.max().item()) if torch.is_tensor(sub_d.max()) else int(sub_d.max())
+        sub_X = sub_X[..., :max_features]
+
+        y_train = sub_y[:, :train_size]
+        y_test = sub_y[:, train_size:seq_len]
+
+        grouped_batches.append((sub_X, y_train, y_test, sub_d, (seq_len, train_size)))
+
+    return grouped_batches
+
+def train(model, dataloader, num_epochs=10, learning_rate=1e-3, max_steps_per_epoch=100):
+    """Train normally across batches."""
     criterion = nn.CrossEntropyLoss()
     optimiser = optim.Adam(model.parameters(), lr=learning_rate)
 
-    # store epoch losses for later analysis
-    epoch_losses = []
+    model.train()
 
-    for t in range(num_epochs):
-
-        print(f"\nTraining epoch number: {t}/{num_epochs}")
+    for epoch in range(num_epochs):
+        print(f"\nEpoch {epoch + 1}/{num_epochs}")
 
         running_loss = 0.0
-        num_batches = 0
+        running_acc = 0.0
+        steps = 0
+        stop_epoch = False
 
-        for i, (features, labels) in enumerate(dataloader):
-            
-            print(f"Mini-table {i} | Shape of data: {features.shape}, {labels.shape}")
+        for i, batch in enumerate(dataloader):
+            grouped_batches = split_batch_by_shape(batch)
 
-            features = features.float()
+            if len(grouped_batches) == 0:
+                raise ValueError("split_batch_by_shape(batch) returned no groups.")
 
-            # forward pass
-            outputs = model(features, labels, test_size=test_size)
+            for sub_batch in grouped_batches:
+                X, y_train, y_test, d, shape_info = sub_batch
 
-            # reshape outputs to (test_size * batch, vocab_size)
-            outputs = outputs.view(-1, vocab_size)
+                X = X.float().to(device)
+                y_train = y_train.long().to(device)
+                y_test = y_test.long().to(device)
+                d = d.to(device)
 
-            # ground truth labels for test rows
-            ground_truth = labels[:, -test_size:].squeeze(-1).long()
+                optimiser.zero_grad()
 
-            loss = criterion(outputs, ground_truth)
+                # Use this if your model API still accepts d
+                logits = model(X, y_train, d)  # (B, test_size, C)
 
-            # backward pass
-            loss.backward()
-            optimiser.step()
-            optimiser.zero_grad()
+                # If your simplified model no longer uses d, use this instead:
+                # logits = model(X, y_train)
 
-            # accumulate statistics
-            running_loss += loss.item()
-            num_batches += 1
+                pred = logits.reshape(-1, logits.size(-1))
+                true = y_test.reshape(-1)
 
-            print("batch_loss:", loss.item())
+                loss = criterion(pred, true)
+                loss.backward()
+                optimiser.step()
 
-        # compute average epoch loss
-        epoch_loss = running_loss / num_batches
-        epoch_losses.append(epoch_loss)
+                acc = (pred.argmax(dim=1) == true).float().mean().item()
 
-        print(f"\nEpoch {t} average loss: {epoch_loss:.6f}")
+                running_loss += loss.item()
+                running_acc += acc
+                steps += 1
 
-    print("\nTraining finished.")
-    print("Epoch losses:", epoch_losses)
+                if steps % 10 == 0:
+                    print(f"Step {steps} | Loss {loss.item():.6f} | Acc {acc:.4f}")
 
-    return model, epoch_losses
+                if steps >= max_steps_per_epoch:
+                    stop_epoch = True
+                    break
 
+            if stop_epoch:
+                break
 
-def overfit_single_batch(training_data, model, vocab_size, test_size=1, batch_size=16):
+        if steps == 0:
+            raise ValueError("No training steps were run in this epoch.")
 
-    print("\nRunning overfit-single-batch test")
-
-    dataloader = DataLoader(training_data, batch_size=batch_size, shuffle=False, pin_memory=True)
-
-    # get batch_size number of mini-tables
-    features, labels = next(iter(dataloader))
-
-    features = features.float().to(device)
-    labels = labels.to(device)
-
-    criterion = nn.CrossEntropyLoss()
-    optimiser = optim.Adam(model.parameters(), lr=1e-3)
-
-    num_steps = 1000
-
-    for step in range(num_steps):
-        # print(f"\nStep {step}/{num_steps}")
-
-        outputs = model(features, labels, test_size=test_size).to(device)
-        outputs = outputs.view(-1, vocab_size)
-
-        ground_truth = labels[:, -test_size:].squeeze(-1).long().to(device)
-
-        loss = criterion(outputs, ground_truth)
-
-        loss.backward()
-        optimiser.step()
-        optimiser.zero_grad()
-
-        if step % 50 == 0:
-            print(f"Step {step} | Loss: {loss.item():.6f}")
-
-    print("\nFinal loss:", loss.item())
+        print(f"Epoch avg loss: {running_loss / steps:.6f}")
+        print(f"Epoch avg acc : {running_acc / steps:.4f}")
 
     return model
 
 
-def test(model, dataset, vocab_size, test_size=1, batch_size=16):
+def overfit_single_batch(model, dataloader, num_steps=500, learning_rate=1e-3):
+    print("\nRunning overfit-single-batch test")
 
-    model.eval()  # disable dropout etc
+    model.train()
 
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+    batch = next(iter(dataloader))
+    grouped_batches = split_batch_by_shape(batch)
 
-    total = 0
-    correct = 0
+    if len(grouped_batches) == 0:
+        raise ValueError("split_batch_by_shape(batch) returned no groups.")
 
-    with torch.no_grad():
+    X, y_train, y_test, d, shape_info = max(grouped_batches, key=lambda g: g[0].shape[0])
+    seq_len, train_size = shape_info
 
-            features, labels = next(iter(dataloader))
-            print(f"Class counts in test batch: {torch.bincount(labels[:, -test_size:].squeeze(-1).long())}")
-            print(f"Fraction of each class in test batch: {torch.bincount(labels[:, -test_size:].squeeze(-1).long()) / labels[:, -test_size:].squeeze(-1).shape[0]}")
+    X = X.float().to(device)
+    y_train = y_train.long().to(device)
+    y_test = y_test.long().to(device)
+    d = d.to(device)
 
-            features = features.float().to(device)
-            labels = labels.to(device)
-            outputs = model(features, labels, test_size=test_size).to(device)
-            outputs = outputs.view(-1, vocab_size)
-
-            ground_truth = labels[:, -test_size:].squeeze(-1).long()
-
-            predictions = outputs.argmax(dim=-1)
-
-            # print("\nMini-table", i)
-            # print("Prediction :", predictions)
-            # print("GroundTruth:", ground_truth)
-
-            correct += (predictions == ground_truth).sum().item()
-            total += ground_truth.numel()
-
-    accuracy = correct / total
-
-    # print("\nTest Accuracy:", accuracy)
-
-    model.train()  # switch back to training mode
-
-    return accuracy
-
-if __name__ == "__main__":
-
-    training_data = TabularDataset(
-        filepath="synthetic_tabicl_data/dataset_0.csv",
-        num_rows_per_datapoint=4
+    print(
+        f"Using overfit batch: "
+        f"X={tuple(X.shape)}, y_train={tuple(y_train.shape)}, y_test={tuple(y_test.shape)}, "
+        f"seq_len={seq_len}, train_size={train_size}"
     )
 
-    vocab_size = training_data.get_num_labels()
-    batch_size = 16
+    if y_test.shape[1] != seq_len - train_size:
+        raise ValueError(
+            f"Bad split: y_test.shape[1]={y_test.shape[1]}, expected {seq_len - train_size}"
+        )
 
-    model = TabICL(vocab_size=vocab_size, embedding_dim=32).to(device)
-    print(f"Before training model: test accuracy: {test(model, training_data, vocab_size, batch_size=batch_size)}")
-    model = overfit_single_batch(training_data, model, vocab_size, batch_size=batch_size)
-    
-    print(f"After training model: test accuracy: {test(model, training_data, vocab_size, batch_size=batch_size)}")
+    criterion = nn.CrossEntropyLoss()
+    optimiser = optim.Adam(model.parameters(), lr=learning_rate)
+
+    for step in range(num_steps):
+        optimiser.zero_grad(set_to_none=True)
+
+        logits = model(X, y_train, d)
+
+        if logits.shape[1] != y_test.shape[1]:
+            raise ValueError(
+                f"logit/test mismatch: logits.shape={tuple(logits.shape)}, y_test.shape={tuple(y_test.shape)}"
+            )
+
+        pred = logits.reshape(-1, logits.size(-1))
+        true = y_test.reshape(-1)
+
+        loss = criterion(pred, true)
+        loss.backward()
+        optimiser.step()
+
+        if step % 50 == 0 or step == num_steps - 1:
+            with torch.no_grad():
+                acc = (pred.argmax(dim=1) == true).float().mean().item()
+            print(f"Step {step:4d}/{num_steps} | Loss {loss.item():.6f} | Acc {acc:.4f}")
+
+    print("Final overfit loss:", loss.item())
+    return model
+
+def test(model, dataloader, num_batches=2):
+    model.eval()
+
+    total_loss = 0.0
+    total_acc = 0.0
+    total_steps = 0
+    criterion = nn.CrossEntropyLoss()
+
+    with torch.no_grad():
+        for i, batch in enumerate(dataloader):
+            grouped_batches = split_batch_by_shape(batch)
+
+            for sub_batch in grouped_batches:
+                X, y_train, y_test, d, shape_info = sub_batch
+                seq_len, train_size = shape_info
+
+                X = X.float().to(device)
+                y_train = y_train.long().to(device)
+                y_test = y_test.long().to(device)
+                d = d.to(device)
+
+                # sanity checks
+                if X.shape[1] != seq_len:
+                    raise ValueError(f"X seq len mismatch: X.shape[1]={X.shape[1]}, seq_len={seq_len}")
+
+                if y_train.shape[1] != train_size:
+                    raise ValueError(
+                        f"y_train mismatch: y_train.shape[1]={y_train.shape[1]}, train_size={train_size}"
+                    )
+
+                if y_test.shape[1] != seq_len - train_size:
+                    raise ValueError(
+                        f"y_test mismatch: y_test.shape[1]={y_test.shape[1]}, seq_len-train_size={seq_len-train_size}"
+                    )
+
+                logits = model(X, y_train, d)
+
+                if logits.shape[1] != y_test.shape[1]:
+                    raise ValueError(
+                        f"logit/test mismatch: logits.shape={tuple(logits.shape)}, y_test.shape={tuple(y_test.shape)}"
+                    )
+
+                pred = logits.reshape(-1, logits.size(-1))
+                true = y_test.reshape(-1)
+
+                loss = criterion(pred, true)
+                acc = (pred.argmax(dim=1) == true).float().mean().item()
+
+                total_loss += loss.item()
+                total_acc += acc
+                total_steps += 1
+
+            if i + 1 >= num_batches:
+                break
+
+    model.train()
+    return total_loss / total_steps, total_acc / total_steps
+
+
+if __name__ == "__main__":
+    batch_size = 1
+    max_seq_len = 64
+    max_features = 20
+    prior_dir = "data"  # set None to generate on the fly
+
+    dataset, dataloader = configure_prior(
+        prior_dir=prior_dir,
+        batch_size=batch_size,
+        max_seq_len=max_seq_len,
+        max_features=max_features,
+    )
+
+    if prior_dir is not None:
+        vocab_size = dataset.metadata.get("max_classes")
+    else:
+        vocab_size = dataset.max_classes
+
+    print("Vocab size:", vocab_size)
+
+    # IMPORTANT:
+    # These argument names should match your current TabICL implementation.
+    model = TabICL(
+        max_classes=vocab_size,
+        embed_dim=16,
+        col_num_blocks=2,
+        col_nhead=2,
+        col_num_inds=32,
+        row_num_blocks=2,
+        row_nhead=2,
+        row_num_cls=4,
+        icl_num_blocks=2,
+        icl_nhead=1,
+        ff_factor=2,
+        dropout=0.0,
+        activation="gelu",
+        norm_first=True,
+    ).to(device)
+
+    before_loss, before_acc = test(model, dataloader, num_batches=2)
+    print(f"\nBefore training | Loss {before_loss:.6f} | Acc {before_acc:.4f}")
+
+    # model = overfit_single_batch(model, dataloader, num_steps=500)
+
+    # after_overfit_loss, after_overfit_acc = test(model, dataloader, num_batches=2)
+    # print(f"\nAfter overfit     | Loss {after_overfit_loss:.6f} | Acc {after_overfit_acc:.4f}")
+
+    model = train(model, dataloader, num_epochs=10, learning_rate=1e-3, max_steps_per_epoch=50)
+
+    final_loss, final_acc = test(model, dataloader, num_batches=2)
+    print(f"\nAfter training    | Loss {final_loss:.6f} | Acc {final_acc:.4f}")
