@@ -589,6 +589,7 @@ class SCMPrior(Prior):
         train_sizes : Tensor
             Position for train/test split for each dataset, shape ``(batch_size,)``.
         """
+        print("Generating batch of datasets with SCM-based prior...")
         batch_size = batch_size or self.batch_size
 
         # Calculate number of groups and subgroups
@@ -947,6 +948,7 @@ class PriorDataset(IterableDataset):
                 device=device,
             )
         elif prior_type in ["mlp_scm", "tree_scm", "mix_scm"]:
+            print(f"Initializing PriorDataset with SCM-based prior '{prior_type}'. This may take some time...")
             self.prior = SCMPrior(
                 batch_size=batch_size,
                 batch_size_per_gp=batch_size_per_gp,
@@ -1079,3 +1081,26 @@ class DisablePrinting:
     def __exit__(self, exc_type, exc_val, exc_tb):
         sys.stdout.close()
         sys.stdout = self.original_stdout
+
+
+if __name__== "__main__":
+    from torch.utils.data import DataLoader
+
+    # generate and save dataset 
+    dataset = PriorDataset(
+        batch_size=16,
+        batch_size_per_gp=4,
+        batch_size_per_subgp=2,
+        min_features=5,
+        max_features=20,
+        max_classes=5,
+        min_seq_len=50,
+        max_seq_len=200,
+        log_seq_len=True,
+        seq_len_per_gp=True,
+        min_train_size=0.1,
+        max_train_size=0.9,
+        replay_small=True,
+        prior_type="mix_scm",
+        device="cpu",
+    )
