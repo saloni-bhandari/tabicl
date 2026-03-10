@@ -85,7 +85,7 @@ def split_batch_by_shape(batch):
 def train(model, dataloader, num_epochs=10, learning_rate=1e-3, max_steps_per_epoch=100):
     """Train normally across batches."""
     criterion = nn.CrossEntropyLoss()
-    optimiser = optim.Adam(model.parameters(), lr=learning_rate)
+    optimiser = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-4)
 
     model.train()
 
@@ -135,6 +135,14 @@ def train(model, dataloader, num_epochs=10, learning_rate=1e-3, max_steps_per_ep
                 if steps % 10 == 0:
                     print(f"Step {steps} | Loss {loss.item():.6f} | Acc {acc:.4f}")
 
+                    preds = pred.argmax(dim=1)
+                    unique_preds = torch.unique(preds)
+                    pred_counts = torch.bincount(preds, minlength=logits.size(-1))
+                    print(f"  Unique classes: {unique_preds.tolist()}")
+                    print(f"  Distribution:   {pred_counts.tolist()}")
+                    print(f"  Logit std:      {logits.std().item():.4f}")
+                    true_counts = torch.bincount(true, minlength=logits.size(-1))
+                    print("  Ground Truth Distribution:", true_counts.tolist())
                 if steps >= max_steps_per_epoch:
                     stop_epoch = True
                     break
@@ -269,10 +277,10 @@ def test(model, dataloader, num_batches=2):
 
 
 if __name__ == "__main__":
-    batch_size = 1
-    max_seq_len = 64
+    batch_size = 8
+    max_seq_len = 256
     max_features = 20
-    prior_dir = "data"  # set None to generate on the fly
+    prior_dir = None  # set None to generate on the fly
 
     dataset, dataloader = configure_prior(
         prior_dir=prior_dir,
@@ -292,22 +300,21 @@ if __name__ == "__main__":
     # These argument names should match your current TabICL implementation.
     model = TabICL(
         max_classes=vocab_size,
-        embed_dim=16,
-        col_num_blocks=2,
-        col_nhead=2,
+        embed_dim=256,       # was 16
+        col_num_blocks=4,
+        col_nhead=4,
         col_num_inds=32,
-        row_num_blocks=2,
-        row_nhead=2,
+        row_num_blocks=4,
+        row_nhead=4,
         row_num_cls=4,
-        icl_num_blocks=2,
-        icl_nhead=1,
+        icl_num_blocks=4,
+        icl_nhead=4, 
         ff_factor=2,
         dropout=0.0,
         activation="gelu",
         norm_first=True,
     ).to(device)
-
-    before_loss, before_acc = test(model, dataloader, num_batches=2)
+    before_loss, before_acc = test(model, dataloader, num_batches=5)
     print(f"\nBefore training | Loss {before_loss:.6f} | Acc {before_acc:.4f}")
 
     # model = overfit_single_batch(model, dataloader, num_steps=500)
@@ -315,7 +322,36 @@ if __name__ == "__main__":
     # after_overfit_loss, after_overfit_acc = test(model, dataloader, num_batches=2)
     # print(f"\nAfter overfit     | Loss {after_overfit_loss:.6f} | Acc {after_overfit_acc:.4f}")
 
-    model = train(model, dataloader, num_epochs=10, learning_rate=1e-3, max_steps_per_epoch=50)
+    model = train(model, dataloader, num_epochs=5, learning_rate=1e-4, max_steps_per_epoch=50)
 
-    final_loss, final_acc = test(model, dataloader, num_batches=2)
+    final_loss, final_acc = test(model, dataloader, num_batches=5)
     print(f"\nAfter training    | Loss {final_loss:.6f} | Acc {final_acc:.4f}")
+
+    model.eval()
+    
+    test_batch = next(iter(dataloader))
+    grouped = split_batch_by_shape(test_batch)
+    
+    X, y_train, y_test, d, _ = grouped[0]
+    
+    X = X.float().to(device)
+    y_train = y_train.long().to(device)
+    y_test = y_test.long().to(device)
+    d = d.to(device)
+
+    with torch.no_grad():
+        logits = model(X, y_train, d=d)
+        preds = logits.argmax(dim=-1)
+
+    print("Test Predictions: ", preds[0, :20].tolist())
+    print("Test Ground Truth:", y_test[0, :20].tolist())
+    
+    accuracy = (preds == y_test).float().mean().item()
+    print(f"Batch Accuracy:    {accuracy:.4f}")
+
+    unique_in_batch = torch.unique(preds)
+    print(f"Unique classes predicted in this batch: {unique_in_batch.tolist()}")
+    pred_counts = torch.bincount(preds.flatten(), minlength=vocab_size)
+    print("Prediction distribution:", pred_counts.tolist())
+    gt_counts = torch.bincount(y_test.flatten(), minlength=10)
+    print(f"Ground Truth Distribution: {gt_counts.tolist()}")
