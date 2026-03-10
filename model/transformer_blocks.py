@@ -49,7 +49,7 @@ class MAB(nn.Module):
             embed_dim=embed_dim,
         )
         nn.init.xavier_uniform_(self.in_proj_weight)
-        nn.init.zeros_(self.out_proj.weight)
+        nn.init.xavier_uniform_(self.out_proj.weight)
         nn.init.zeros_(self.out_proj.bias)
         nn.init.zeros_(self.ff[3].weight)
         nn.init.zeros_(self.ff[3].bias)

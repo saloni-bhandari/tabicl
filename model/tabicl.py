@@ -74,11 +74,11 @@ class TabICL(nn.Module):
 
         col_embeddings = self.col_embedder(
             X,
-            y_train=y_train,
+            y_train=y_train, d=d
         )
 
         row_repr = self.row_interactor(
-            col_embeddings
+            col_embeddings, d=d
         )
 
         logits = self.icl_predictor(

@@ -117,10 +117,12 @@ class ICLearning(nn.Module):
         mask = self._build_attention_mask(T, train_size, R.device)
 
         self._debug_print("Mask:", mask)
+        rope = self.transformer.rope
+        self._debug_print("Rope:", rope)
 
         # transformer
         for block in self.transformer.blocks:
-            rep = block(rep, attn_mask=mask)
+            rep = block(rep, attn_mask=mask, rope=rope)
 
         self._debug_print("After transformer:", rep.shape)
 

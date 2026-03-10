@@ -47,19 +47,13 @@ class Encoder(nn.Module):
         )
         self.recompute = recompute
 
-    def forward(self, src: Tensor, train_size: Optional[int] = None) -> Tensor:
+    def forward(self, src: Tensor, attn_mask: Optional[Tensor] = None) -> Tensor:
         out = src
         for block in self.blocks:
-            if train_size is not None:
-                k = v = out[..., :train_size, :]
-            else:
-                k = v = out
-
             if self.recompute:
-                out = checkpoint(partial(block, k=k, v=v, rope=self.rope), out, use_reentrant=False)
+                out = checkpoint(partial(block, rope=self.rope, attn_mask=attn_mask), out, use_reentrant=False)
             else:
-                out = block(q=out, k=k, v=v, rope=self.rope)
-                
+                out = block(q=out, rope=self.rope, attn_mask=attn_mask)
         return out
 
 class SetTransformer(nn.Module):

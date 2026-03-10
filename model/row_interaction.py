@@ -76,9 +76,10 @@ class RowInteraction(nn.Module):
 
         self._debug_print("After adding CLS:", X.shape)
 
+        rope = self.tfrow.rope
         # transformer blocks
         for block in self.tfrow.blocks:
-            X = block(X)
+            X = block(X, rope=rope)
 
         self._debug_print("After transformer:", X.shape)
 
