@@ -22,6 +22,7 @@ def configure_prior(prior_dir, batch_size=16, max_seq_len=128, max_features=10):
             batch_size=batch_size,
             max_seq_len=max_seq_len,
             max_features=max_features,
+            prior_type="mix_scm",
         )
     else:
         print(f"Loading prior dataset from directory: {prior_dir}")
@@ -31,8 +32,8 @@ def configure_prior(prior_dir, batch_size=16, max_seq_len=128, max_features=10):
         dataset,
         batch_size=None,
         shuffle=False,
-        num_workers=1,
-        prefetch_factor=4,
+        num_workers=0,
+        prefetch_factor=None,
     )
 
     return dataset, dataloader
@@ -82,12 +83,38 @@ def split_batch_by_shape(batch):
 
     return grouped_batches
 
-def train(model, dataloader, num_epochs=10, learning_rate=1e-3, max_steps_per_epoch=100):
-    """Train normally across batches."""
-    criterion = nn.CrossEntropyLoss()
-    optimiser = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-4)
+def make_scheduler(optimiser, schedule, total_steps, lr_init, lr_end=0.0):
+    if schedule == "cosine_restarts":
+        return torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimiser, T_0=max(1, total_steps // 5), eta_min=1e-6
+        )
+    elif schedule == "polynomial":
+        def poly_lambda(step):
+            frac = max(0.0, 1.0 - step / total_steps)
+            lr = (lr_init - lr_end) * (frac ** 2) + lr_end
+            return lr / lr_init
+        return torch.optim.lr_scheduler.LambdaLR(optimiser, lr_lambda=poly_lambda)
+    else:
+        return torch.optim.lr_scheduler.LambdaLR(optimiser, lr_lambda=lambda _: 1.0)
 
+def train(model, dataloader, num_epochs=10, learning_rate=1e-3, max_steps_per_epoch=100,
+            lr_schedule="constant", lr_end=0.0, frozen_modules=None):
+    """Train normally across batches."""
+    max_steps = num_epochs * max_steps_per_epoch
+
+    frozen_params = set()
+    if frozen_modules:
+        for m in frozen_modules:
+            for p in m.parameters():
+                frozen_params.add(id(p))
+
+    trainable_params = [p for p in model.parameters()
+                        if id(p) not in frozen_params and p.requires_grad]
+    criterion = nn.CrossEntropyLoss()
+    optimiser = torch.optim.AdamW(trainable_params, lr=learning_rate, weight_decay=1e-4)
+    scheduler = make_scheduler(optimiser, lr_schedule, max_steps, learning_rate, lr_end)
     model.train()
+    
 
     for epoch in range(num_epochs):
         print(f"\nEpoch {epoch + 1}/{num_epochs}")
@@ -124,7 +151,13 @@ def train(model, dataloader, num_epochs=10, learning_rate=1e-3, max_steps_per_ep
 
                 loss = criterion(pred, true)
                 loss.backward()
+                if not torch.isfinite(loss):
+                    print(f"  WARNING: non-finite loss {loss.item()}, skipping step")
+                    optimiser.zero_grad()
+                    continue
+                torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=0.5)
                 optimiser.step()
+                scheduler.step()
 
                 acc = (pred.argmax(dim=1) == true).float().mean().item()
 
@@ -275,11 +308,36 @@ def test(model, dataloader, num_batches=2):
     model.train()
     return total_loss / total_steps, total_acc / total_steps
 
+def inspect_predictions(model, dataloader, vocab_size, device):
+    model.eval()
+    batch = next(iter(dataloader))
+    grouped = split_batch_by_shape(batch)
+    X, y_train, y_test, d, _ = grouped[0]
+
+    X       = X.float().to(device)
+    y_train = y_train.long().to(device)
+    y_test  = y_test.long().to(device)
+    d       = d.to(device)
+
+    with torch.no_grad():
+        logits = model(X, y_train, d=d)
+        preds  = logits.argmax(dim=-1)
+
+    accuracy = (preds == y_test).float().mean().item()
+    print(f"Batch Accuracy:    {accuracy:.4f}")
+    unique_in_batch = torch.unique(preds)
+    print(f"Unique classes predicted: {unique_in_batch.tolist()}")
+    pred_counts = torch.bincount(preds.flatten(), minlength=vocab_size)
+    print(f"Pred distribution: {pred_counts.tolist()}")
+    gt_counts = torch.bincount(y_test.flatten(), minlength=vocab_size)
+    print(f"Ground truth distribution:   {gt_counts.tolist()}")
+    model.train()
+
 
 if __name__ == "__main__":
-    batch_size = 8
-    max_seq_len = 256
-    max_features = 20
+    batch_size = 4
+    max_seq_len = 1024
+    max_features = 40
     prior_dir = None  # set None to generate on the fly
 
     dataset, dataloader = configure_prior(
@@ -300,14 +358,14 @@ if __name__ == "__main__":
     # These argument names should match your current TabICL implementation.
     model = TabICL(
         max_classes=vocab_size,
-        embed_dim=256,       # was 16
-        col_num_blocks=4,
+        embed_dim=128,       # was 16
+        col_num_blocks=3,
         col_nhead=4,
-        col_num_inds=32,
-        row_num_blocks=4,
-        row_nhead=4,
+        col_num_inds=128,
+        row_num_blocks=3,
+        row_nhead=8,
         row_num_cls=4,
-        icl_num_blocks=4,
+        icl_num_blocks=12,
         icl_nhead=4, 
         ff_factor=2,
         dropout=0.0,
@@ -322,36 +380,39 @@ if __name__ == "__main__":
     # after_overfit_loss, after_overfit_acc = test(model, dataloader, num_batches=2)
     # print(f"\nAfter overfit     | Loss {after_overfit_loss:.6f} | Acc {after_overfit_acc:.4f}")
 
-    model = train(model, dataloader, num_epochs=5, learning_rate=1e-4, max_steps_per_epoch=50)
+    # model = train(model, dataloader, num_epochs=5, learning_rate=1e-4, max_steps_per_epoch=50)
 
-    final_loss, final_acc = test(model, dataloader, num_batches=5)
-    print(f"\nAfter training    | Loss {final_loss:.6f} | Acc {final_acc:.4f}")
+    # final_loss, final_acc = test(model, dataloader, num_batches=5)
+    # print(f"\nAfter training    | Loss {final_loss:.6f} | Acc {final_acc:.4f}")
+    print("\n=== STAGE 1 ===")
+    _, dataloader1 = configure_prior(None, batch_size=4, max_seq_len=1024, max_features=max_features)
+    model = train(model, dataloader1, num_epochs=1, learning_rate=1e-4, max_steps_per_epoch=10000,
+                  lr_schedule="cosine_restarts")
+    l, a = test(model, dataloader1)
+    print(f"Stage 1 test | Loss {l:.4f} | Acc {a:.4f}")
+    inspect_predictions(model, dataloader1, vocab_size, device)
+    torch.save(model.state_dict(), "tabicl_stage1.pt")
+    print("Saved to tabicl_stage1.pt")
 
-    model.eval()
-    
-    test_batch = next(iter(dataloader))
-    grouped = split_batch_by_shape(test_batch)
-    
-    X, y_train, y_test, d, _ = grouped[0]
-    
-    X = X.float().to(device)
-    y_train = y_train.long().to(device)
-    y_test = y_test.long().to(device)
-    d = d.to(device)
+    print("\n=== STAGE 2 ===")
+    _, dataloader2 = configure_prior(None, batch_size=1, max_seq_len=2048, max_features=max_features)
+    model = train(model, dataloader2, num_epochs=1, learning_rate=2e-5, max_steps_per_epoch=500,
+                  lr_schedule="polynomial", lr_end=5e-6)
+    l, a = test(model, dataloader2)
+    print(f"Stage 2 test | Loss {l:.4f} | Acc {a:.4f}")
+    inspect_predictions(model, dataloader2, vocab_size, device)
+    torch.save(model.state_dict(), "tabicl_stage2.pt")
+    print("Saved to tabicl_stage2.pt")
 
-    with torch.no_grad():
-        logits = model(X, y_train, d=d)
-        preds = logits.argmax(dim=-1)
+    print("\n=== STAGE 3 ===")
+    _, dataloader3 = configure_prior(None, batch_size=1, max_seq_len=4096, max_features=max_features)
+    model = train(model, dataloader3, num_epochs=1, learning_rate=2e-6, max_steps_per_epoch=50,
+                  lr_schedule="constant",
+                  frozen_modules=[model.col_embedder, model.row_interactor])
+    l, a = test(model, dataloader3)
+    print(f"Stage 3 test | Loss {l:.4f} | Acc {a:.4f}")
+    inspect_predictions(model, dataloader3, vocab_size, device)
 
-    print("Test Predictions: ", preds[0, :20].tolist())
-    print("Test Ground Truth:", y_test[0, :20].tolist())
-    
-    accuracy = (preds == y_test).float().mean().item()
-    print(f"Batch Accuracy:    {accuracy:.4f}")
-
-    unique_in_batch = torch.unique(preds)
-    print(f"Unique classes predicted in this batch: {unique_in_batch.tolist()}")
-    pred_counts = torch.bincount(preds.flatten(), minlength=vocab_size)
-    print("Prediction distribution:", pred_counts.tolist())
-    gt_counts = torch.bincount(y_test.flatten(), minlength=10)
-    print(f"Ground Truth Distribution: {gt_counts.tolist()}")
+    print("\nTest run complete.")
+    torch.save(model.state_dict(), "tabicl_test_run.pt")
+    print("Saved to tabicl_test_run.pt")
