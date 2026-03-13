@@ -1,4 +1,7 @@
 import time
+import json
+from pathlib import Path
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -13,7 +16,13 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
 
 
-def configure_prior(prior_dir, batch_size=16, max_seq_len=128, max_features=10):
+ANALYSIS_DIR = Path("analysis")
+ANALYSIS_DIR.mkdir(exist_ok=True)
+STEP_LOG_INTERVAL = 10
+DIST_LOG_INTERVAL = 50
+
+
+def configure_prior(prior_dir, batch_size=16, max_seq_len=128, max_features=10, max_classes=10):
     """Set up a tabular dataset generator for synthetic data during training."""
 
     if prior_dir is None:
@@ -24,6 +33,7 @@ def configure_prior(prior_dir, batch_size=16, max_seq_len=128, max_features=10):
             max_seq_len=max_seq_len,
             max_features=max_features,
             prior_type="mix_scm",
+            max_classes=max_classes,
         )
     else:
         print(f"Loading prior dataset from directory: {prior_dir}")
@@ -98,8 +108,23 @@ def make_scheduler(optimiser, schedule, total_steps, lr_init, lr_end=0.0):
     else:
         return torch.optim.lr_scheduler.LambdaLR(optimiser, lr_lambda=lambda _: 1.0)
 
+
+def append_jsonl(path, record):
+    with path.open("a") as f:
+        f.write(json.dumps(record) + "\n")
+
+
+def save_summary_artifacts(run_summary, base_name="train_metrics"):
+    json_path = ANALYSIS_DIR / f"{base_name}_summary.json"
+    pt_path = ANALYSIS_DIR / f"{base_name}_summary.pt"
+    json_path.write_text(json.dumps(run_summary, indent=2))
+    torch.save(run_summary, pt_path)
+    print(f"Saved analysis summary to {json_path} and {pt_path}")
+
+
 def train(model, dataloader, num_epochs=10, learning_rate=1e-3, max_steps_per_epoch=100,
-            lr_schedule="constant", lr_end=0.0, frozen_modules=None):
+            lr_schedule="constant", lr_end=0.0, frozen_modules=None, history=None, stage_name="train",
+            step_log_path=None, dist_log_path=None):
     """Train normally across batches."""
     max_steps = num_epochs * max_steps_per_epoch
 
@@ -116,6 +141,8 @@ def train(model, dataloader, num_epochs=10, learning_rate=1e-3, max_steps_per_ep
     scheduler = make_scheduler(optimiser, lr_schedule, max_steps, learning_rate, lr_end)
     model.train()
     
+    if history is None:
+        history = {"epochs": []}
 
     for epoch in range(num_epochs):
         print(f"\nEpoch {epoch + 1}/{num_epochs}")
@@ -161,22 +188,49 @@ def train(model, dataloader, num_epochs=10, learning_rate=1e-3, max_steps_per_ep
                 scheduler.step()
 
                 acc = (pred.argmax(dim=1) == true).float().mean().item()
+                preds = pred.argmax(dim=1)
+                pred_counts = torch.bincount(preds, minlength=logits.size(-1)).cpu().tolist()
+                true_counts = torch.bincount(true, minlength=logits.size(-1)).cpu().tolist()
+                step_record = {
+                    "stage": stage_name,
+                    "epoch": epoch + 1,
+                    "step": steps + 1,
+                    "loss": loss.item(),
+                    "accuracy": acc,
+                    "learning_rate": scheduler.get_last_lr()[0],
+                    "seq_len": int(shape_info[0]),
+                    "train_size": int(shape_info[1]),
+                    "batch_size": int(X.shape[0]),
+                    "max_features": int(X.shape[-1]),
+                    "active_features_max": int(d.max().item()),
+                    "logit_std": logits.std().item(),
+                }
+                if step_log_path is not None:
+                    append_jsonl(step_log_path, step_record)
+                if dist_log_path is not None and steps % DIST_LOG_INTERVAL == 0:
+                    append_jsonl(
+                        dist_log_path,
+                        {
+                            "stage": stage_name,
+                            "epoch": epoch + 1,
+                            "step": steps + 1,
+                            "pred_distribution": pred_counts,
+                            "true_distribution": true_counts,
+                        },
+                    )
 
                 running_loss += loss.item()
                 running_acc += acc
                 steps += 1
 
-                if steps % 10 == 0:
+                if steps % STEP_LOG_INTERVAL == 0:
                     print(f"Step {steps} | Loss {loss.item():.6f} | Acc {acc:.4f}")
 
-                    preds = pred.argmax(dim=1)
                     unique_preds = torch.unique(preds)
-                    pred_counts = torch.bincount(preds, minlength=logits.size(-1))
                     print(f"  Unique classes: {unique_preds.tolist()}")
-                    print(f"  Distribution:   {pred_counts.tolist()}")
+                    print(f"  Distribution:   {pred_counts}")
                     print(f"  Logit std:      {logits.std().item():.4f}")
-                    true_counts = torch.bincount(true, minlength=logits.size(-1))
-                    print("  Ground Truth Distribution:", true_counts.tolist())
+                    print("  Ground Truth Distribution:", true_counts)
                 if steps >= max_steps_per_epoch:
                     stop_epoch = True
                     break
@@ -187,10 +241,18 @@ def train(model, dataloader, num_epochs=10, learning_rate=1e-3, max_steps_per_ep
         if steps == 0:
             raise ValueError("No training steps were run in this epoch.")
 
-        print(f"Epoch avg loss: {running_loss / steps:.6f}")
-        print(f"Epoch avg acc : {running_acc / steps:.4f}")
+        epoch_record = {
+            "stage": stage_name,
+            "epoch": epoch + 1,
+            "avg_loss": running_loss / steps,
+            "avg_accuracy": running_acc / steps,
+            "num_steps": steps,
+        }
+        history["epochs"].append(epoch_record)
+        print(f"Epoch avg loss: {epoch_record['avg_loss']:.6f}")
+        print(f"Epoch avg acc : {epoch_record['avg_accuracy']:.4f}")
 
-    return model
+    return model, history
 
 
 def overfit_single_batch(model, dataloader, num_steps=500, learning_rate=1e-3):
@@ -307,7 +369,12 @@ def test(model, dataloader, num_batches=2):
                 break
 
     model.train()
-    return total_loss / total_steps, total_acc / total_steps
+    return {
+        "loss": total_loss / total_steps,
+        "accuracy": total_acc / total_steps,
+        "num_batches": num_batches,
+        "num_steps": total_steps,
+    }
 
 def inspect_predictions(model, dataloader, vocab_size, device):
     model.eval()
@@ -325,27 +392,38 @@ def inspect_predictions(model, dataloader, vocab_size, device):
         preds  = logits.argmax(dim=-1)
 
     accuracy = (preds == y_test).float().mean().item()
-    print(f"Batch Accuracy:    {accuracy:.4f}")
-    unique_in_batch = torch.unique(preds)
-    print(f"Unique classes predicted: {unique_in_batch.tolist()}")
     pred_counts = torch.bincount(preds.flatten(), minlength=vocab_size)
-    print(f"Pred distribution: {pred_counts.tolist()}")
     gt_counts = torch.bincount(y_test.flatten(), minlength=vocab_size)
-    print(f"Ground truth distribution:   {gt_counts.tolist()}")
+    summary = {
+        "accuracy": accuracy,
+        "unique_classes_predicted": unique_in_batch.tolist() if (unique_in_batch := torch.unique(preds)).numel() > 0 else [],
+        "pred_distribution": pred_counts.cpu().tolist(),
+        "ground_truth_distribution": gt_counts.cpu().tolist(),
+        "logit_std": logits.std().item(),
+        "logit_mean": logits.mean().item(),
+    }
+
+    print(f"Batch Accuracy:    {accuracy:.4f}")
+    print(f"Unique classes predicted: {summary['unique_classes_predicted']}")
+    print(f"Pred distribution: {summary['pred_distribution']}")
+    print(f"Ground truth distribution:   {summary['ground_truth_distribution']}")
     model.train()
+    return summary
 
 
 if __name__ == "__main__":
-    batch_size = 4
-    max_seq_len = 1024
-    max_features = 100
+    batch_size = 1
+    max_seq_len = 100
+    max_features = 10
     prior_dir = None  # set None to generate on the fly
+    max_classes = 2
 
     dataset, dataloader = configure_prior(
         prior_dir=prior_dir,
         batch_size=batch_size,
         max_seq_len=max_seq_len,
         max_features=max_features,
+        max_classes=max_classes,
     )
 
     if prior_dir is not None:
@@ -359,22 +437,36 @@ if __name__ == "__main__":
     # These argument names should match your current TabICL implementation.
     model = TabICL(
         max_classes=vocab_size,
-        embed_dim=128,       # was 16
+        embed_dim=16,       # was 16
         col_num_blocks=3,
-        col_nhead=4,
-        col_num_inds=128,
+        col_nhead=2,
+        col_num_inds=4,
         row_num_blocks=3,
-        row_nhead=8,
+        row_nhead=2,
         row_num_cls=4,
-        icl_num_blocks=12,
+        icl_num_blocks=4,
         icl_nhead=4, 
         ff_factor=2,
         dropout=0.0,
         activation="gelu",
         norm_first=True,
     ).to(device)
-    before_loss, before_acc = test(model, dataloader, num_batches=5)
-    print(f"\nBefore training | Loss {before_loss:.6f} | Acc {before_acc:.4f}")
+    run_history = {
+        "device": str(device),
+        "max_classes": max_classes,
+        "max_features": max_features,
+        "initial_eval": None,
+        "stages": {},
+    }
+    step_log_path = ANALYSIS_DIR / "train_metrics_steps.jsonl"
+    dist_log_path = ANALYSIS_DIR / "train_metrics_distributions.jsonl"
+    for log_path in (step_log_path, dist_log_path):
+        log_path.write_text("")
+
+    initial_eval = test(model, dataloader, num_batches=5)
+    run_history["initial_eval"] = initial_eval
+    print(f"\nBefore training | Loss {initial_eval['loss']:.6f} | Acc {initial_eval['accuracy']:.4f}")
+    save_summary_artifacts(run_history)
 
     # model = overfit_single_batch(model, dataloader, num_steps=500)
 
@@ -387,55 +479,96 @@ if __name__ == "__main__":
     # print(f"\nAfter training    | Loss {final_loss:.6f} | Acc {final_acc:.4f}")
     print("\n=== STAGE 1 ===")
     stage1_start = time.time()
-    _, dataloader1 = configure_prior(None, batch_size=8, max_seq_len=1024, max_features=max_features)
-    model = train(model, dataloader1, num_epochs=1, learning_rate=1e-4, max_steps_per_epoch=5000,
-                  lr_schedule="cosine_restarts")
-    l, a = test(model, dataloader1)
+    _, dataloader1 = configure_prior(None, batch_size=8, max_seq_len=1024, max_features=max_features, max_classes=max_classes)
+    stage1_history = {"epochs": []}
+    model, stage1_history = train(
+        model, dataloader1, num_epochs=1, learning_rate=1e-4, max_steps_per_epoch=50,
+        lr_schedule="cosine_restarts", history=stage1_history, stage_name="stage1",
+        step_log_path=step_log_path, dist_log_path=dist_log_path
+    )
+    stage1_eval = test(model, dataloader1)
     stage1_end = time.time()
     stage1_duration = stage1_end - stage1_start
     
-    print(f"Stage 1 test | Loss {l:.4f} | Acc {a:.4f}")
+    print(f"Stage 1 test | Loss {stage1_eval['loss']:.4f} | Acc {stage1_eval['accuracy']:.4f}")
     print(f"--> Stage 1 Total Time: {stage1_duration:.2f} seconds ({stage1_duration / 60:.2f} minutes)")
-    inspect_predictions(model, dataloader1, vocab_size, device)
+    stage1_predictions = inspect_predictions(model, dataloader1, vocab_size, device)
+    run_history["stages"]["stage1"] = {
+        "duration_seconds": stage1_duration,
+        "train": stage1_history,
+        "eval": stage1_eval,
+        "prediction_summary": stage1_predictions,
+        "checkpoint": "tabicl_stage1.pt",
+    }
     torch.save(model.state_dict(), "tabicl_stage1.pt")
     print("Saved to tabicl_stage1.pt")
+    save_summary_artifacts(run_history)
     del dataloader1  # Explicitly delete the old loader
     torch.cuda.empty_cache()
     # model.load_state_dict(torch.load("tabicl_stage1.pt", map_location=device, weights_only=True))
 
     print("\n=== STAGE 2 ===")
     stage2_start = time.time()
-    _, dataloader2 = configure_prior(None, batch_size=4, max_seq_len=2048, max_features=max_features)
-    model = train(model, dataloader2, num_epochs=1, learning_rate=2e-5, max_steps_per_epoch=500,
-                  lr_schedule="polynomial", lr_end=5e-6)
-    l, a = test(model, dataloader2)
+    _, dataloader2 = configure_prior(None, batch_size=4, max_seq_len=2048, max_features=max_features, max_classes=max_classes)
+    stage2_history = {"epochs": []}
+    model, stage2_history = train(
+        model, dataloader2, num_epochs=1, learning_rate=2e-5, max_steps_per_epoch=50,
+        lr_schedule="polynomial", lr_end=5e-6, history=stage2_history, stage_name="stage2",
+        step_log_path=step_log_path, dist_log_path=dist_log_path
+    )
+    stage2_eval = test(model, dataloader2)
     stage2_end = time.time()
     stage2_duration = stage2_end - stage2_start
     
-    print(f"Stage 2 test | Loss {l:.4f} | Acc {a:.4f}")
+    print(f"Stage 2 test | Loss {stage2_eval['loss']:.4f} | Acc {stage2_eval['accuracy']:.4f}")
     print(f"--> Stage 2 Total Time: {stage2_duration:.2f} seconds ({stage2_duration / 60:.2f} minutes)")
-    inspect_predictions(model, dataloader2, vocab_size, device)
+    stage2_predictions = inspect_predictions(model, dataloader2, vocab_size, device)
+    run_history["stages"]["stage2"] = {
+        "duration_seconds": stage2_duration,
+        "train": stage2_history,
+        "eval": stage2_eval,
+        "prediction_summary": stage2_predictions,
+        "checkpoint": "tabicl_stage2.pt",
+    }
     torch.save(model.state_dict(), "tabicl_stage2.pt")
     print("Saved to tabicl_stage2.pt")
+    save_summary_artifacts(run_history)
     del dataloader2
     torch.cuda.empty_cache()
 
     print("\n=== STAGE 3 ===")
     stage3_start = time.time()
-    _, dataloader3 = configure_prior(None, batch_size=1, max_seq_len=16384, max_features=max_features)
-    model = train(model, dataloader3, num_epochs=1, learning_rate=2e-6, max_steps_per_epoch=50,
-                  lr_schedule="constant",
-                  frozen_modules=[model.col_embedder, model.row_interactor])
-    l, a = test(model, dataloader3)
+    _, dataloader3 = configure_prior(None, batch_size=1, max_seq_len=16384, max_features=max_features, max_classes=max_classes)
+    stage3_history = {"epochs": []}
+    model, stage3_history = train(
+        model, dataloader3, num_epochs=1, learning_rate=2e-6, max_steps_per_epoch=50,
+        lr_schedule="constant", frozen_modules=[model.col_embedder, model.row_interactor],
+        history=stage3_history, stage_name="stage3",
+        step_log_path=step_log_path, dist_log_path=dist_log_path
+    )
+    stage3_eval = test(model, dataloader3)
     stage3_end = time.time()
     stage3_duration = stage3_end - stage3_start
     
-    print(f"Stage 3 test | Loss {l:.4f} | Acc {a:.4f}")
+    print(f"Stage 3 test | Loss {stage3_eval['loss']:.4f} | Acc {stage3_eval['accuracy']:.4f}")
     print(f"--> Stage 3 Total Time: {stage3_duration:.2f} seconds ({stage3_duration / 60:.2f} minutes)")
+    stage3_predictions = inspect_predictions(model, dataloader3, vocab_size, device)
+    run_history["stages"]["stage3"] = {
+        "duration_seconds": stage3_duration,
+        "train": stage3_history,
+        "eval": stage3_eval,
+        "prediction_summary": stage3_predictions,
+        "checkpoint": "tabicl_test_run.pt",
+    }
+    save_summary_artifacts(run_history)
     inspect_predictions(model, dataloader3, vocab_size, device)
 
     print("\nTest run complete.")
     torch.save(model.state_dict(), "tabicl_test_run.pt")
     total_time = stage1_duration + stage2_duration + stage3_duration
+    run_history["total_duration_seconds"] = total_time
+    run_history["step_log_path"] = str(step_log_path)
+    run_history["distribution_log_path"] = str(dist_log_path)
+    save_summary_artifacts(run_history)
     print(f"Total Script Time: {total_time:.2f} seconds ({total_time / 60:.2f} minutes)")
     print("Saved to tabicl_test_run.pt")

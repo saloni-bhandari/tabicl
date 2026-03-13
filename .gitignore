@@ -10,3 +10,5 @@ __pycache__/
 synthetic_tabicl_data
 *.pt
 data/
+analysis/
+balls/
