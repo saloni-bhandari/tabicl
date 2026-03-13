@@ -14,6 +14,9 @@ class ICLearning(nn.Module):
         num_blocks=12,
         dim_feedforward=2048,
         vocab_size=100,
+        dropout=0.0,
+        activation="gelu",
+        rope_base=100000,
         debug=False,
     ):
         super().__init__()
@@ -29,17 +32,17 @@ class ICLearning(nn.Module):
             d_model=embedding_dim,
             nhead=nhead,
             dim_feedforward=dim_feedforward,
-            dropout=0.0,
-            activation="gelu",
+            dropout=dropout,
+            activation=activation,
             use_rope=True,
-            rope_base=100000,
+            rope_base=rope_base,
             rope_interleaved=True,
             recompute=False,
         )
 
         self.prediction_MLP = nn.Sequential(
             nn.Linear(embedding_dim, embedding_dim * 2),
-            nn.GELU(),
+            nn.GELU() if activation == "gelu" else nn.ReLU(),
             nn.Linear(embedding_dim * 2, vocab_size),
         )
 
@@ -117,12 +120,7 @@ class ICLearning(nn.Module):
         mask = self._build_attention_mask(T, train_size, R.device)
 
         self._debug_print("Mask:", mask)
-        rope = self.transformer.rope
-        self._debug_print("Rope:", rope)
-
-        # transformer
-        for block in self.transformer.blocks:
-            rep = block(rep, attn_mask=mask, rope=rope)
+        rep = self.transformer(rep, attn_mask=mask)
 
         self._debug_print("After transformer:", rep.shape)
 

@@ -14,7 +14,10 @@ class ColEmbedding(nn.Module):
         nhead,
         num_classes,
         num_blocks=3,
+        num_inds=128,
         dim_feedforward=64,
+        dropout=0.0,
+        activation="gelu",
         debug=False,
     ):
         super().__init__()
@@ -36,6 +39,9 @@ class ColEmbedding(nn.Module):
             d_model=embedding_dim,
             nhead=nhead,
             dim_feedforward=dim_feedforward,
+            num_inds=num_inds,
+            dropout=dropout,
+            activation=activation,
         )
 
         self.generate_W = nn.Linear(embedding_dim, embedding_dim)

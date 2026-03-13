@@ -18,6 +18,7 @@ class TabICL(nn.Module):
         row_num_blocks=3,
         row_nhead=8,
         row_num_cls=4,
+        row_rope_base=100000,
         icl_num_blocks=12,
         icl_nhead=8,
         ff_factor=2,
@@ -38,7 +39,10 @@ class TabICL(nn.Module):
             nhead=col_nhead,
             num_classes=max_classes,
             num_blocks=col_num_blocks,
+            num_inds=col_num_inds,
             dim_feedforward=embed_dim * ff_factor,
+            dropout=dropout,
+            activation=activation,
             debug=debug,
         )
 
@@ -48,6 +52,9 @@ class TabICL(nn.Module):
             nhead=row_nhead,
             num_cls=row_num_cls,
             dim_feedforward=embed_dim * ff_factor,
+            dropout=dropout,
+            activation=activation,
+            rope_base=row_rope_base,
             debug=debug,
         )
 
@@ -57,6 +64,9 @@ class TabICL(nn.Module):
             num_blocks=icl_num_blocks,
             dim_feedforward=embed_dim * row_num_cls * ff_factor,
             vocab_size=max_classes,
+            dropout=dropout,
+            activation=activation,
+            rope_base=row_rope_base,
             debug=debug,
         )
 
@@ -74,11 +84,14 @@ class TabICL(nn.Module):
 
         col_embeddings = self.col_embedder(
             X,
-            y_train=y_train, d=d
+            y_train=y_train,
+            d=d,
+            embed_with_test=embed_with_test,
         )
 
         row_repr = self.row_interactor(
-            col_embeddings, d=d
+            col_embeddings,
+            d=d,
         )
 
         logits = self.icl_predictor(

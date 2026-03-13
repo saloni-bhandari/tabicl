@@ -13,6 +13,9 @@ class RowInteraction(nn.Module):
         nhead=1,
         dim_feedforward=2048,
         num_cls=4,
+        dropout=0.0,
+        activation="gelu",
+        rope_base=100000,
         debug=False,
     ):
         super().__init__()
@@ -30,10 +33,10 @@ class RowInteraction(nn.Module):
             d_model=embedding_dim,
             nhead=nhead,
             dim_feedforward=dim_feedforward,
-            dropout=0.0,
-            activation="gelu",
+            dropout=dropout,
+            activation=activation,
             use_rope=True,
-            rope_base=100000,
+            rope_base=rope_base,
             rope_interleaved=True,
             recompute=False,
         )
