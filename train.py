@@ -1,3 +1,4 @@
+import time
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -337,7 +338,7 @@ def inspect_predictions(model, dataloader, vocab_size, device):
 if __name__ == "__main__":
     batch_size = 4
     max_seq_len = 1024
-    max_features = 40
+    max_features = 100
     prior_dir = None  # set None to generate on the fly
 
     dataset, dataloader = configure_prior(
@@ -385,34 +386,56 @@ if __name__ == "__main__":
     # final_loss, final_acc = test(model, dataloader, num_batches=5)
     # print(f"\nAfter training    | Loss {final_loss:.6f} | Acc {final_acc:.4f}")
     print("\n=== STAGE 1 ===")
-    _, dataloader1 = configure_prior(None, batch_size=4, max_seq_len=1024, max_features=max_features)
-    model = train(model, dataloader1, num_epochs=1, learning_rate=1e-4, max_steps_per_epoch=10000,
+    stage1_start = time.time()
+    _, dataloader1 = configure_prior(None, batch_size=8, max_seq_len=1024, max_features=max_features)
+    model = train(model, dataloader1, num_epochs=1, learning_rate=1e-4, max_steps_per_epoch=5000,
                   lr_schedule="cosine_restarts")
     l, a = test(model, dataloader1)
+    stage1_end = time.time()
+    stage1_duration = stage1_end - stage1_start
+    
     print(f"Stage 1 test | Loss {l:.4f} | Acc {a:.4f}")
+    print(f"--> Stage 1 Total Time: {stage1_duration:.2f} seconds ({stage1_duration / 60:.2f} minutes)")
     inspect_predictions(model, dataloader1, vocab_size, device)
     torch.save(model.state_dict(), "tabicl_stage1.pt")
     print("Saved to tabicl_stage1.pt")
+    del dataloader1  # Explicitly delete the old loader
+    torch.cuda.empty_cache()
+    # model.load_state_dict(torch.load("tabicl_stage1.pt", map_location=device, weights_only=True))
 
     print("\n=== STAGE 2 ===")
-    _, dataloader2 = configure_prior(None, batch_size=1, max_seq_len=2048, max_features=max_features)
+    stage2_start = time.time()
+    _, dataloader2 = configure_prior(None, batch_size=4, max_seq_len=2048, max_features=max_features)
     model = train(model, dataloader2, num_epochs=1, learning_rate=2e-5, max_steps_per_epoch=500,
                   lr_schedule="polynomial", lr_end=5e-6)
     l, a = test(model, dataloader2)
+    stage2_end = time.time()
+    stage2_duration = stage2_end - stage2_start
+    
     print(f"Stage 2 test | Loss {l:.4f} | Acc {a:.4f}")
+    print(f"--> Stage 2 Total Time: {stage2_duration:.2f} seconds ({stage2_duration / 60:.2f} minutes)")
     inspect_predictions(model, dataloader2, vocab_size, device)
     torch.save(model.state_dict(), "tabicl_stage2.pt")
     print("Saved to tabicl_stage2.pt")
+    del dataloader2
+    torch.cuda.empty_cache()
 
     print("\n=== STAGE 3 ===")
-    _, dataloader3 = configure_prior(None, batch_size=1, max_seq_len=4096, max_features=max_features)
+    stage3_start = time.time()
+    _, dataloader3 = configure_prior(None, batch_size=1, max_seq_len=16384, max_features=max_features)
     model = train(model, dataloader3, num_epochs=1, learning_rate=2e-6, max_steps_per_epoch=50,
                   lr_schedule="constant",
                   frozen_modules=[model.col_embedder, model.row_interactor])
     l, a = test(model, dataloader3)
+    stage3_end = time.time()
+    stage3_duration = stage3_end - stage3_start
+    
     print(f"Stage 3 test | Loss {l:.4f} | Acc {a:.4f}")
+    print(f"--> Stage 3 Total Time: {stage3_duration:.2f} seconds ({stage3_duration / 60:.2f} minutes)")
     inspect_predictions(model, dataloader3, vocab_size, device)
 
     print("\nTest run complete.")
     torch.save(model.state_dict(), "tabicl_test_run.pt")
+    total_time = stage1_duration + stage2_duration + stage3_duration
+    print(f"Total Script Time: {total_time:.2f} seconds ({total_time / 60:.2f} minutes)")
     print("Saved to tabicl_test_run.pt")
