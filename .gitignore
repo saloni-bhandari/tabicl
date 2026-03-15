@@ -12,3 +12,5 @@ synthetic_tabicl_data
 data/
 analysis/
 balls/
+wandb/
+logs/
