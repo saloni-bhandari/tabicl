@@ -12,7 +12,6 @@ from sklearn.dummy import DummyClassifier
 from lightgbm import LGBMClassifier
 from xgboost import XGBClassifier
 
-MAX_FEATURES = 100
 MAX_CLASSES = 10
 N_SPLITS = 5
 
@@ -77,10 +76,6 @@ def preprocess(X, y, seed):
     scaler = StandardScaler()
     X_train = scaler.fit_transform(X_train)
     X_test = scaler.transform(X_test)
-
-    if X_train.shape[1] > MAX_FEATURES:
-        X_train = X_train[:, :MAX_FEATURES]
-        X_test = X_test[:, :MAX_FEATURES]
 
     return X_train, X_test, y_train, y_test
 

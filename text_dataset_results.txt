@@ -1,0 +1,73 @@
+Loading model...
+Model loaded.
+
+Scanning datasets in: text_datasets
+
+  [OK] customer_complaints: X=(3000, 299), classes=4
+  [OK] hs_cards: X=(2810, 299), classes=10
+  [OK] job_frauds: X=(3000, 299), classes=2
+  [OK] kickstarter: X=(3000, 299), classes=2
+  [OK] osha_accidents: X=(3000, 299), classes=2
+  [OK] spotify: X=(3000, 299), classes=10
+
+========== CUSTOMER_COMPLAINTS ==========
+  Split 1/5 | Acc: 0.5673  AUC: 0.8307  (14.2s)
+  Split 2/5 | Acc: 0.5867  AUC: 0.8416  (13.8s)
+  Split 3/5 | Acc: 0.5733  AUC: 0.8289  (13.8s)
+  Split 4/5 | Acc: 0.5847  AUC: 0.8396  (13.8s)
+  Split 5/5 | Acc: 0.5820  AUC: 0.8248  (13.8s)
+  -> Acc: 0.5788 ± 0.0073   AUC: 0.8331 ± 0.0064
+
+========== HS_CARDS ==========
+  Split 1/5 | Acc: 0.6342  AUC: 0.6345  (13.0s)
+  Split 2/5 | Acc: 0.6342  AUC: 0.6253  (13.0s)
+  Split 3/5 | Acc: 0.6342  AUC: 0.6363  (13.0s)
+  Split 4/5 | Acc: 0.6342  AUC: 0.6317  (13.0s)
+  Split 5/5 | Acc: 0.6342  AUC: 0.6263  (13.0s)
+  -> Acc: 0.6342 ± 0.0000   AUC: 0.6308 ± 0.0044
+
+========== JOB_FRAUDS ==========
+  Split 1/5 | Acc: 0.8493  AUC: 0.8834  (13.8s)
+  Split 2/5 | Acc: 0.8547  AUC: 0.8977  (13.8s)
+  Split 3/5 | Acc: 0.8613  AUC: 0.8962  (13.8s)
+  Split 4/5 | Acc: 0.8427  AUC: 0.8658  (13.8s)
+  Split 5/5 | Acc: 0.8453  AUC: 0.8798  (13.8s)
+  -> Acc: 0.8507 ± 0.0067   AUC: 0.8846 ± 0.0117
+
+========== KICKSTARTER ==========
+  Split 1/5 | Acc: 0.6840  AUC: 0.7464  (13.8s)
+  Split 2/5 | Acc: 0.6620  AUC: 0.7159  (13.8s)
+  Split 3/5 | Acc: 0.6693  AUC: 0.7170  (13.8s)
+  Split 4/5 | Acc: 0.6640  AUC: 0.7209  (13.8s)
+  Split 5/5 | Acc: 0.6613  AUC: 0.7163  (13.8s)
+  -> Acc: 0.6681 ± 0.0084   AUC: 0.7233 ± 0.0117
+
+========== OSHA_ACCIDENTS ==========
+  Split 1/5 | Acc: 0.5633  AUC: 0.5859  (13.8s)
+  Split 2/5 | Acc: 0.5493  AUC: 0.5682  (13.8s)
+  Split 3/5 | Acc: 0.5573  AUC: 0.5687  (13.8s)
+  Split 4/5 | Acc: 0.5547  AUC: 0.5664  (13.8s)
+  Split 5/5 | Acc: 0.5533  AUC: 0.5804  (13.8s)
+  -> Acc: 0.5556 ± 0.0046   AUC: 0.5739 ± 0.0077
+
+========== SPOTIFY ==========
+  Split 1/5 | Acc: 0.5407  AUC: 0.8899  (13.8s)
+  Split 2/5 | Acc: 0.5280  AUC: 0.8853  (13.8s)
+  Split 3/5 | Acc: 0.5320  AUC: 0.8824  (13.8s)
+  Split 4/5 | Acc: 0.5420  AUC: 0.8856  (13.8s)
+  Split 5/5 | Acc: 0.5480  AUC: 0.8879  (13.8s)
+  -> Acc: 0.5381 ± 0.0072   AUC: 0.8862 ± 0.0025
+
+
+========================================================================
+DATASET                        CLASSES      ACC      ±      AUC      ±
+========================================================================
+customer_complaints                  4   0.5788 0.0073   0.8331 0.0064
+hs_cards                            10   0.6342 0.0000   0.6308 0.0044
+job_frauds                           2   0.8507 0.0067   0.8846 0.0117
+kickstarter                          2   0.6681 0.0084   0.7233 0.0117
+osha_accidents                       2   0.5556 0.0046   0.5739 0.0077
+spotify                             10   0.5381 0.0072   0.8862 0.0025
+========================================================================
+MEAN                                     0.6376          0.7553
+========================================================================

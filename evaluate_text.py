@@ -1,9 +1,11 @@
 import torch
 import numpy as np
+import pandas as pd
 import random
 import time
+import os
+import glob
 
-from sklearn.datasets import fetch_openml
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.metrics import roc_auc_score
@@ -20,60 +22,46 @@ MAX_CLASSES = 10
 N_PERMUTATIONS = 32
 N_SPLITS = 5
 
+CUSTOM_DATASETS_DIR = "text_datasets"
 
 torch.manual_seed(0)
 np.random.seed(0)
 random.seed(0)
 
 
-DATASETS = {
-    "balance_scale": 11,
-    "mfeat_fourier": 14,
-    "breast_w": 15,
-    "mfeat_karhunen": 16,
-    "mfeat_morphological": 18,
-    "mfeat_zernike": 22,
-    "cmc": 23,
-    "credit_approval": 29,
-    "credit_g": 31,
-    "diabetes": 37,
-    "tic_tac_toe": 50,
-    "vehicle": 54,
-    "eucalyptus": 188,
-    "analcatdata_authorship": 458,
-    "analcatdata_dmft": 469,
-    "pc4": 1049,
-    "pc3": 1050,
-    "kc2": 1063,
-    "pc1": 1068,
-    "banknote_authentication": 1462,
-    "blood_transfusion": 1464,
-    "ilpd": 1480,
-    "qsar_biodeg": 1494,
-    "wdc": 1510,
-    "cylinder_bands": 1523,
-    "steel_plates_fault": 40982,
-    "climate_model_crashes": 40994,
-    "car": 40975,
-    "iris": 61,
-}
+def load_custom_datasets(root_dir):
+    datasets = {}
+    for folder in sorted(os.listdir(root_dir)):
+        folder_path = os.path.join(root_dir, folder)
+        if not os.path.isdir(folder_path):
+            continue
 
+        x_files = glob.glob(os.path.join(folder_path, "*_X.npy"))
+        y_files = glob.glob(os.path.join(folder_path, "*_y.npy"))
 
-def load_dataset(dataset_id):
-    data = fetch_openml(data_id=dataset_id, as_frame=True, parser="auto")
+        if len(x_files) != 1 or len(y_files) != 1:
+            print(f"  [SKIP] {folder}: expected 1 *_X.npy and 1 *_y.npy, "
+                  f"found {len(x_files)} and {len(y_files)}")
+            continue
 
-    df = data.frame
-    target_col = data.target_names[0]
+        X_raw = np.load(x_files[0], allow_pickle=True)
+        X = pd.DataFrame(X_raw).apply(pd.to_numeric, errors='coerce').to_numpy(dtype=np.float64).copy()
 
-    X = df.drop(columns=[target_col])
-    y = df[target_col]
+        col_means = np.nanmean(X, axis=0)
+        col_means = np.where(np.isnan(col_means), 0.0, col_means)
+        nan_mask = np.isnan(X)
+        X[nan_mask] = np.take(col_means, np.where(nan_mask)[1])
+        X = X.astype(np.float32)
 
-    for col in X.select_dtypes(include=["object", "category"]).columns:
-        X[col] = LabelEncoder().fit_transform(X[col].astype(str))
+        y = LabelEncoder().fit_transform(
+            np.load(y_files[0], allow_pickle=True).astype(str)
+        ).astype(np.int64)
 
-    y = LabelEncoder().fit_transform(y.astype(str))
+        datasets[folder] = (X, y)
+        print(f"  [OK] {folder}: X={X.shape}, classes={len(np.unique(y))}")
 
-    return X.values.astype(np.float32), y.astype(np.int64)
+    return datasets
+
 
 def preprocess(X, y, seed):
     X_train, X_test, y_train, y_test = train_test_split(
@@ -85,6 +73,7 @@ def preprocess(X, y, seed):
     X_test = scaler.transform(X_test)
 
     d = X_train.shape[1]
+
     return X_train, X_test, y_train, y_test, d
 
 
@@ -106,10 +95,10 @@ def invert_probs(probs, inv_mapping):
         reordered[:, original_class] = probs[:, perm_class]
     return reordered
 
+
 def compute_roc_auc(y_true, probs, num_classes):
     probs = probs[:, :num_classes]
 
-    # Renormalize to avoid floating point issues after ensembling
     row_sums = probs.sum(axis=1, keepdims=True)
     row_sums = np.where(row_sums == 0, 1, row_sums)
     probs = probs / row_sums
@@ -198,19 +187,20 @@ def main():
     model.load_state_dict(checkpoint["state_dict"])
     print("Model loaded.\n")
 
+    print(f"Scanning datasets in: {CUSTOM_DATASETS_DIR}\n")
+    datasets = load_custom_datasets(CUSTOM_DATASETS_DIR)
+
     results = {}
 
-    for name, dataset_id in DATASETS.items():
+    for name, (X, y) in datasets.items():
         print(f"\n========== {name.upper()} ==========")
 
-        X, y = load_dataset(dataset_id)
         num_classes = len(np.unique(y))
-
         if num_classes > MAX_CLASSES:
+            print(f"  [SKIP] {num_classes} classes exceeds MAX_CLASSES={MAX_CLASSES}")
             continue
 
-        split_accs = []
-        split_aucs = []
+        split_accs, split_aucs = [], []
 
         for split in range(N_SPLITS):
             print(f"  Split {split+1}/{N_SPLITS}", end=" ")
@@ -235,15 +225,13 @@ def main():
         std_acc = np.std(split_accs)
         mean_auc = np.nanmean(split_aucs)
         std_auc = np.nanstd(split_aucs)
-
         print(f"  -> Acc: {mean_acc:.4f} ± {std_acc:.4f}   AUC: {mean_auc:.4f} ± {std_auc:.4f}")
 
     print("\n\n" + "=" * 72)
     print(f"{'DATASET':<30} {'CLASSES':>7} {'ACC':>8} {'±':>6} {'AUC':>8} {'±':>6}")
     print("=" * 72)
 
-    all_accs = []
-    all_aucs = []
+    all_accs, all_aucs = [], []
 
     for name, res in results.items():
         mean_acc = np.mean(res["acc"])
@@ -253,7 +241,6 @@ def main():
         nc = res["num_classes"]
 
         print(f"{name:<30} {nc:>7} {mean_acc:>8.4f} {std_acc:>6.4f} {mean_auc:>8.4f} {std_auc:>6.4f}")
-
         all_accs.append(mean_acc)
         all_aucs.append(mean_auc)
 
